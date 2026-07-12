@@ -101,6 +101,38 @@ export default function (pi: ExtensionAPI) {
   const hideTasks = (ctx: any) => {
     if (ctx.mode === "tui") ctx.ui.setWidget("pi-continuity", undefined);
   };
+  const compactMemory = async () =>
+    withStateLock(dir, async () => {
+      const latestFacts = (
+          await readJson(
+            paths().memory,
+            { schemaVersion: 1 as const, facts: [] as Fact[] },
+            isMemoryFile,
+          )
+        ).facts,
+        latestCandidates = (
+          await readJson(
+            paths().candidates,
+            { schemaVersion: 1 as const, candidates: [] as Candidate[] },
+            isCandidatesFile,
+          )
+        ).candidates;
+      facts = latestFacts;
+      candidates = latestCandidates;
+      if (!candidates.some((item) => item.status === "pending")) return;
+      const result = compact(facts, candidates, 80);
+      facts = result.facts;
+      candidates = result.candidates;
+      await writeJson(paths().memory, {
+        schemaVersion: 1,
+        facts,
+        updatedAt: new Date().toISOString(),
+      });
+      await writeJson(paths().candidates, {
+        schemaVersion: 1,
+        candidates,
+      });
+    });
   const gate = (on: boolean) => {
     let coordinated = false;
     pi.events.emit("pi-conductor:tool-policy", {
@@ -180,7 +212,10 @@ export default function (pi: ExtensionAPI) {
     });
   });
   pi.on("agent_start", (_e, ctx) => refresh(ctx));
-  pi.on("agent_settled", (_e, ctx) => hideTasks(ctx));
+  pi.on("agent_settled", async (_e, ctx) => {
+    hideTasks(ctx);
+    await compactMemory();
+  });
   pi.on("tool_call", (event) => {
     if (blocked(work?.mode === "planning", event.toolName))
       return {
@@ -472,34 +507,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const sub = args.trim();
       if (sub === "compact") {
-        await withStateLock(dir, async () => {
-          const latestFacts = (
-              await readJson(
-                paths().memory,
-                { schemaVersion: 1 as const, facts: [] as Fact[] },
-                isMemoryFile,
-              )
-            ).facts,
-            latestCandidates = (
-              await readJson(
-                paths().candidates,
-                { schemaVersion: 1 as const, candidates: [] as Candidate[] },
-                isCandidatesFile,
-              )
-            ).candidates,
-            result = compact(latestFacts, latestCandidates, 80);
-          facts = result.facts;
-          candidates = result.candidates;
-          await writeJson(paths().memory, {
-            schemaVersion: 1,
-            facts,
-            updatedAt: new Date().toISOString(),
-          });
-          await writeJson(paths().candidates, {
-            schemaVersion: 1,
-            candidates,
-          });
-        });
+        await compactMemory();
         ctx.ui.notify(
           `Applied memory candidates. ${facts.length} facts.`,
           "info",

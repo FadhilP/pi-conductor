@@ -66,7 +66,7 @@ test("set_plan creates executing todos without explicit plan mode", async () => 
   }
 });
 
-test("memory candidate survives compact and reload into model context without active work", async () => {
+test("memory candidates survive manual and turn-end compact into model context", async () => {
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   const root = await mkdtemp(join(tmpdir(), "continuity-extension-memory-"));
   const cwd = join(root, "repo");
@@ -94,12 +94,26 @@ test("memory candidate survives compact and reload into model context without ac
     );
     assert.match(result.content[0].text, /stored/);
     await first.commands.get("memory").handler("compact", ctx);
+    await first.tools.get("continuity_update").execute(
+      "call", {
+        action: "memory_candidate",
+        key: "workflow.lint",
+        kind: "workflow",
+        text: "Run npm run check before release",
+        source: "project instructions",
+        confidence: 1,
+        memoryAction: "add",
+      }, undefined, undefined, ctx,
+    );
+    for (const handler of first.handlers.get("agent_settled") ?? [])
+      await handler({}, ctx);
 
     const second = runtime();
     for (const handler of second.handlers.get("session_start") ?? [])
       await handler({ reason: "startup" }, ctx);
     const context = await second.handlers.get("context")?.[0]({ messages: [] }, ctx);
     assert.match(context.messages.at(-1).content, /Memory workflow\.verify: Run npm test before release/);
+    assert.match(context.messages.at(-1).content, /Memory workflow\.lint: Run npm run check before release/);
   } finally {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
