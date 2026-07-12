@@ -14,8 +14,12 @@ export function buildContext(
     ),
     score = (f: Fact) =>
       [...words(`${f.key} ${f.text}`)].filter((w) => query.has(w)).length;
-  const selected = [...facts].sort(
-    (a, b) => score(b) - score(a) || b.updatedAt.localeCompare(a.updatedAt),
+  const relevant = (fact: Fact) => fact.kind === "preference" || score(fact) > 0;
+  const selected = facts.filter(relevant).sort(
+    (a, b) =>
+      Number(b.kind === "preference") - Number(a.kind === "preference") ||
+      score(b) - score(a) ||
+      b.updatedAt.localeCompare(a.updatedAt),
   );
   const lines = [
     "Continuity context. Durable memory may be stale; direct instructions and repository evidence override it.",
@@ -35,7 +39,12 @@ export function buildContext(
   lines.push(
     ...selected.map((f) => `Memory ${f.key}: ${f.text}`),
     ...parent
-      .filter((f) => score(f) > 0)
+      .filter(relevant)
+      .sort(
+        (a, b) =>
+          Number(b.kind === "preference") - Number(a.kind === "preference") ||
+          score(b) - score(a),
+      )
       .slice(0, 2)
       .map((f) => `Parent memory ${f.key}: ${f.text}`),
   );

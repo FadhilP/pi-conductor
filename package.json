@@ -1,8 +1,8 @@
 {
-  "name": "pi-full-setup",
+  "name": "pi-conductor",
   "version": "0.1.0",
   "private": true,
-  "description": "Complete Pi setup",
+  "description": "Complete Pi Conductor package with all extensions and themes.",
   "type": "module",
   "keywords": [
     "pi-package"
@@ -26,12 +26,7 @@
       "./pi-focus/themes/focus-dark.json"
     ]
   },
-  "dependencies": {
-    "@vitejs/plugin-react": "^6.0.3",
-    "vite": "^8.1.4",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
-  },
+  "dependencies": {},
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

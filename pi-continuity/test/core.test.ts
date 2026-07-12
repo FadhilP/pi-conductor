@@ -37,7 +37,32 @@ test("memory deterministic", () => {
     confidence: 1,
     action: "add",
   });
-  assert.equal(compact([], [c]).facts.length, 1);
+  const result = compact([], [c]);
+  assert.equal(result.facts.length, 1);
+  assert.deepEqual(result.candidates, []);
+});
+test("memory is keyed and retention favors preferences and warnings", () => {
+  const first = candidate({
+      key: "workflow.test", kind: "workflow", text: "npm test", source: "README",
+      confidence: 1, action: "add",
+    }),
+    second = candidate({
+      key: "workflow.test", kind: "workflow", text: "npm run test", source: "package.json",
+      confidence: 1, action: "add",
+    });
+  const keyed = compact([], [first, second]);
+  assert.equal(keyed.facts.length, 1);
+  assert.equal(keyed.facts[0].text, "npm run test");
+
+  const facts: Fact[] = [
+    { key: "workflow.build", kind: "workflow", text: "Build", source: "scripts", confidence: 1, updatedAt: "2026-03-01" },
+    { key: "warning.deploy", kind: "warning", text: "Check deploy", source: "README", confidence: 0.5, updatedAt: "2026-02-01" },
+    { key: "preference.style", kind: "preference", text: "Keep output terse", source: "user", confidence: 0.5, updatedAt: "2026-01-01" },
+  ];
+  assert.deepEqual(
+    compact(facts, [], 2).facts.map((fact) => fact.key),
+    ["preference.style", "warning.deploy"],
+  );
 });
 test("memory persists, compacts, reloads, and reaches child context", async () => {
   const root = await mkdtemp(join(tmpdir(), "continuity-memory-"));
@@ -80,7 +105,7 @@ test("memory persists, compacts, reloads, and reaches child context", async () =
     { schemaVersion: 1 as const, candidates: [] as Candidate[] },
     isCandidatesFile,
   );
-  assert.equal(decidedCandidates.candidates[0].status, "applied");
+  assert.deepEqual(decidedCandidates.candidates, []);
   await writeJson(memoryPath, { schemaVersion: 1, facts: [{ bad: true }] });
   const rejectedMemory = await readJson(
     memoryPath,
@@ -110,6 +135,15 @@ test("empty continuity state injects no context", () => {
 test("context bounded active first", () => {
   const w = fresh("goal");
   assert.ok(buildContext(w, [], "", 20).length <= 80);
+});
+test("context always includes preferences and excludes unrelated facts", () => {
+  const facts: Fact[] = [
+    { key: "preference.style", kind: "preference", text: "Keep output terse", source: "user", confidence: 1, updatedAt: "2026-01-01" },
+    { key: "workflow.release", kind: "workflow", text: "Run release check", source: "README", confidence: 1, updatedAt: "2026-01-01" },
+  ];
+  const text = buildContext(undefined, facts, "discuss database migrations");
+  assert.match(text, /Memory preference\.style: Keep output terse/);
+  assert.doesNotMatch(text, /workflow\.release/);
 });
 test("context exposes exact todo IDs and status", () => {
   const w = fresh("goal");

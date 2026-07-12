@@ -42,7 +42,8 @@ export const isMemoryFile = (value: any): value is MemoryFile =>
   value?.schemaVersion === 1 && Array.isArray(value.facts) && value.facts.every(isFact);
 export const isCandidatesFile = (value: any): value is CandidatesFile =>
   value?.schemaVersion === 1 && Array.isArray(value.candidates) && value.candidates.every(isCandidate);
-const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+const retentionPriority = (fact: Fact) =>
+  fact.kind === "preference" ? 2 : fact.kind === "warning" ? 1 : 0;
 export function candidate(
   input: Omit<Candidate, "id" | "status" | "createdAt" | "updatedAt">,
 ): Candidate {
@@ -57,35 +58,26 @@ export function candidate(
   };
 }
 export function compact(facts: Fact[], candidates: Candidate[], max = 80) {
-  const out = [...facts];
-  for (const c of candidates.filter((c) => c.status === "pending")) {
-    if (c.action === "remove") {
-      const i = out.findIndex((f) => f.key === c.key);
-      if (i >= 0) out.splice(i, 1);
-    } else if (c.action === "replace") {
-      const i = out.findIndex((f) => f.key === c.key);
-      const f: Fact = {
-        key: c.key,
-        kind: c.kind,
-        text: c.text,
-        source: c.source,
-        confidence: c.confidence,
-        updatedAt: new Date().toISOString(),
-      };
-      i >= 0 ? out.splice(i, 1, f) : out.push(f);
-    } else if (
-      !out.some((f) => f.key === c.key && norm(f.text) === norm(c.text))
-    )
-      out.push({
-        key: c.key,
-        kind: c.kind,
-        text: c.text,
-        source: c.source,
-        confidence: c.confidence,
+  const keyed = new Map(facts.map((fact) => [fact.key, fact]));
+  for (const item of candidates.filter((item) => item.status === "pending")) {
+    if (item.action === "remove") keyed.delete(item.key);
+    else
+      keyed.set(item.key, {
+        key: item.key,
+        kind: item.kind,
+        text: item.text,
+        source: item.source,
+        confidence: item.confidence,
         updatedAt: new Date().toISOString(),
       });
-    c.status = "applied";
-    c.decidedAt = new Date().toISOString();
   }
-  return { facts: out.slice(-max), candidates };
+  const kept = [...keyed.values()]
+    .sort(
+      (a, b) =>
+        retentionPriority(b) - retentionPriority(a) ||
+        b.confidence - a.confidence ||
+        b.updatedAt.localeCompare(a.updatedAt),
+    )
+    .slice(0, max);
+  return { facts: kept, candidates: [] as Candidate[] };
 }

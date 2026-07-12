@@ -256,7 +256,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "Update plan, todos, state, clarification, or durable-memory candidate.",
     promptGuidelines: [
-      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list without activating the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. During execution, use exact todo IDs from Continuity context: mark one todo in_progress before work, then mark it done immediately after verification. Before final response, update every todo touched this turn and set completion true when none remain. Record concise failures/next action. Propose memory only for durable non-secret facts.",
+      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list without activating the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. During execution, use exact todo IDs from Continuity context: mark one todo in_progress before work, then mark it done immediately after verification. Before final response, update every todo touched this turn and set completion true when none remain. Record concise failures/next action. Propose memory only for explicit user preferences, verified project commands, stable architecture boundaries, repeated corrections, or recurring warnings. Require user or repository/tool evidence in source. Never save task progress, guesses, one-time errors, temporary file state, repository-obvious facts, or secrets. Reuse stable keys; add and replace both set one fact per key.",
     ],
     renderShell: "self",
     renderCall: () => new Container(),
@@ -546,6 +546,39 @@ export default function (pi: ExtensionAPI) {
         candidates = [];
         gate(false);
         refresh(ctx);
+      } else if (sub.startsWith("forget ")) {
+        const key = sub.slice("forget ".length).trim();
+        if (!key) return void ctx.ui.notify("Memory key required.", "error");
+        let removed = false;
+        await withStateLock(dir, async () => {
+          const latestFacts = (
+              await readJson(
+                paths().memory,
+                { schemaVersion: 1 as const, facts: [] as Fact[] },
+                isMemoryFile,
+              )
+            ).facts,
+            latestCandidates = (
+              await readJson(
+                paths().candidates,
+                { schemaVersion: 1 as const, candidates: [] as Candidate[] },
+                isCandidatesFile,
+              )
+            ).candidates;
+          removed = latestFacts.some((fact) => fact.key === key);
+          facts = latestFacts.filter((fact) => fact.key !== key);
+          candidates = latestCandidates.filter((item) => item.key !== key);
+          await writeJson(paths().memory, {
+            schemaVersion: 1,
+            facts,
+            updatedAt: new Date().toISOString(),
+          });
+          await writeJson(paths().candidates, {
+            schemaVersion: 1,
+            candidates,
+          });
+        });
+        ctx.ui.notify(removed ? `Forgot memory ${key}.` : `Memory ${key} not found.`, "info");
       } else
         ctx.ui.notify(
           `${facts.length} facts, ${candidates.filter((c) => c.status === "pending").length} pending candidates.`,

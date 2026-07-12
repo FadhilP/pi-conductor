@@ -111,9 +111,15 @@ test("memory candidates survive manual and turn-end compact into model context",
     const second = runtime();
     for (const handler of second.handlers.get("session_start") ?? [])
       await handler({ reason: "startup" }, ctx);
+    for (const handler of second.handlers.get("input") ?? [])
+      await handler({ source: "user", text: "verify lint release check" }, ctx);
     const context = await second.handlers.get("context")?.[0]({ messages: [] }, ctx);
     assert.match(context.messages.at(-1).content, /Memory workflow\.verify: Run npm test before release/);
     assert.match(context.messages.at(-1).content, /Memory workflow\.lint: Run npm run check before release/);
+    await second.commands.get("memory").handler("forget workflow.verify", ctx);
+    const afterForget = await second.handlers.get("context")?.[0]({ messages: [] }, ctx);
+    assert.doesNotMatch(afterForget.messages.at(-1).content, /workflow\.verify/);
+    assert.match(afterForget.messages.at(-1).content, /workflow\.lint/);
   } finally {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
