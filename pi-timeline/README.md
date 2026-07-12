@@ -1,0 +1,11 @@
+# pi-timeline
+
+Git-backed filesystem checkpoints paired with Pi user prompts. Requires non-bare Git repo with existing HEAD and safe index state.
+
+Commands: `/timeline`, `/timeline list`, `/timeline jump ID`, `/timeline fork ID`, `/timeline clear`. Launcher: `pi-timeline resume`.
+
+After first completed turn, unnamed sessions receive a concise display name from their first prompt. Existing names and manually cleared names remain untouched.
+
+Snapshots use `refs/pi-timeline/...` synthetic commits. HEAD, branch, stash, ignored files remain untouched. Ordinary untracked files are included; common credential paths such as `.env*`, `.npmrc`, `.pypirc`, key files, and credential files are refused. Git operations time out after two minutes. `/timeline clear` retires current-session checkpoint records and deletes their refs. Every restore requires confirmation. Native `/tree` remains conversation-only.
+
+V1 refuses submodules, unmerged/active Git operations, changed HEAD, and noninteractive restore. Extensions execute with full user permissions; review source.

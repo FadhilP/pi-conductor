@@ -1,0 +1,41 @@
+{
+  "name": "pi-full-setup",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Complete Pi setup",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "pi": {
+    "extensions": [
+      "./pi-advisor/extensions/pi-advisor.ts",
+      "./pi-conductor-core/extensions/pi-conductor-core.ts",
+      "./pi-continuity/extensions/pi-continuity.ts",
+      "./pi-focus/extensions/pi-focus.ts",
+      "./pi-guard/extensions/pi-guard.ts",
+      "./pi-heartbeat/extensions/pi-heartbeat.ts",
+      "./pi-scout/extensions/pi-scout.ts",
+      "./pi-timeline/extensions/pi-timeline.ts",
+      "./pi-verify/extensions/pi-verify.ts"
+    ],
+    "themes": [
+      "./pi-focus/themes/focus-dark.json"
+    ]
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.0.3",
+    "vite": "^8.1.4",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

@@ -1,0 +1,43 @@
+# pi-conductor-core
+
+Optional runtime tool coordination for local Pi packages. Packages remain fully functional without Conductor. When installed, they publish tool policies through Pi's event bus; Conductor merges them and becomes the sole active-tool reconciler.
+
+## Install
+
+```sh
+pi install /absolute/path/to/pi-conductor-core
+```
+
+Then `/reload`. `/conductor` shows registered package policies.
+
+## V1 scope
+
+- Merges independently enabled tools without lost updates.
+- Tracks unmanaged baseline tools separately from package-managed tools.
+- Intersects restrictive tool gates fail-closed.
+- Validates versioned policy messages and keeps rejection diagnostics.
+- Supports policy unregister and removes event listeners during shutdown/reload.
+- Lets Continuity planning retain read-only Scout and Advisor tools when enabled.
+- Coordinates `pi-advisor`, `pi-scout`, and `pi-continuity`.
+- Falls back to each package's existing standalone behavior when Conductor is absent.
+- Tests all three real package adapters together.
+
+V1 does not coordinate TUI ownership, context ordering, storage, child processes, or benchmark packages. Add those only after concrete conflicts appear.
+
+## Protocol
+
+Packages synchronously emit `pi-conductor:tool-policy` during `session_start` and whenever policy changes:
+
+```ts
+pi.events.emit("pi-conductor:tool-policy", {
+  version: 1,
+  kind: "register",
+  owner: "pi-example",
+  managedTools: ["example_tool"],
+  enabledTools: ["example_tool"],
+  allowOnly: undefined,
+  acknowledge: () => { coordinated = true; },
+});
+```
+
+No acknowledgement means Conductor is absent; package applies its standalone behavior. On `session_shutdown`, emit `{ version: 1, kind: "unregister", owner: "pi-example" }`.

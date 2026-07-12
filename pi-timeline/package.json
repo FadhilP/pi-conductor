@@ -1,0 +1,20 @@
+{
+  "name": "pi-timeline",
+  "version": "0.1.0",
+  "description": "Git-backed filesystem checkpoints paired with Pi prompts",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "engines": { "node": ">=22.18.0" },
+  "files": ["bin", "extensions", "src", "README.md", "LICENSE"],
+  "bin": { "pi-timeline": "./bin/pi-timeline.mjs" },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "check": "tsc --noEmit"
+  },
+  "pi": { "extensions": ["./extensions/pi-timeline.ts"] },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": { "typescript": "^5.8.0" },
+  "license": "MIT"
+}
