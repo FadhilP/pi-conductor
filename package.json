@@ -27,7 +27,6 @@
       "./pi-helios/extensions/pi-helios.ts",
       "./pi-scout/extensions/search-tools.ts",
       "./pi-scout/extensions/pi-scout.ts",
-      "./pi-scout/extensions/scout-checkpoint.ts",
       "./pi-timeline/extensions/pi-timeline.ts",
       "./pi-verify/extensions/pi-verify.ts"
     ],

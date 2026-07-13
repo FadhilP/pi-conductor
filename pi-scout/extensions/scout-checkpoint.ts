@@ -1,3 +1,5 @@
+// Currently disabled: intentionally omitted from package.json's Pi extension list.
+// Kept for possible timeout-checkpoint recovery re-enablement.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { saveCheckpoint } from "../src/checkpoint.ts";

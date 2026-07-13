@@ -12,7 +12,6 @@ import heartbeat from "../pi-heartbeat/extensions/pi-heartbeat.ts";
 import helios from "../pi-helios/extensions/pi-helios.ts";
 import searchTools from "../pi-scout/extensions/search-tools.ts";
 import scout from "../pi-scout/extensions/pi-scout.ts";
-import scoutCheckpoint from "../pi-scout/extensions/scout-checkpoint.ts";
 import timeline from "../pi-timeline/extensions/pi-timeline.ts";
 import verify from "../pi-verify/extensions/pi-verify.ts";
 import { mapLimit } from "../scripts/run-packages-lib.mjs";
@@ -59,7 +58,6 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
     "./pi-helios/extensions/pi-helios.ts",
     "./pi-scout/extensions/search-tools.ts",
     "./pi-scout/extensions/pi-scout.ts",
-    "./pi-scout/extensions/scout-checkpoint.ts",
     "./pi-timeline/extensions/pi-timeline.ts",
     "./pi-verify/extensions/pi-verify.ts",
   ]);
@@ -92,14 +90,14 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
       sendUserMessage: () => {},
       exec: async () => ({ code: 0, stdout: "", stderr: "" }),
     };
-    [advisor, conductor, continuity, focus, guard, heartbeat, helios, searchTools, scout, scoutCheckpoint, timeline, verify]
+    [advisor, conductor, continuity, focus, guard, heartbeat, helios, searchTools, scout, timeline, verify]
       .forEach((extension) => extension(pi));
 
     assert.deepEqual([...commands.keys()].sort(), [
       "advisor", "conductor", "continuity", "guard", "heartbeat", "memory", "plan", "scout", "timeline", "todos", "ui",
     ]);
     assert.deepEqual([...tools.keys()].sort(), [
-      "advisor", "continuity_update", "fd", "heartbeat_cancel", "heartbeat_start", "heartbeat_status", "helios_capture", "repo_scout", "rg", "scout_checkpoint", "verify",
+      "advisor", "continuity_update", "fd", "heartbeat_cancel", "heartbeat_start", "heartbeat_status", "helios_capture", "repo_scout", "rg", "verify",
     ]);
     assert.ok(renderers.has("pi-scout-session"));
 
