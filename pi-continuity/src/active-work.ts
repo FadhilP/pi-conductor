@@ -7,7 +7,7 @@ export type Todo = {
 };
 export type Work = {
   schemaVersion: 1;
-  mode: "planning" | "executing" | "completed" | "cancelled";
+  mode: "planning" | "executing" | "handed_off" | "completed" | "cancelled";
   goal: string;
   approved: boolean;
   constraints: string[];
@@ -16,11 +16,20 @@ export type Work = {
   currentTodoId?: string;
   latestFailure?: string;
   nextAction?: string;
+  runId?: string;
+  baseModel?: { provider: string; id: string };
+  baseThinking?: string;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
 };
-const modes = new Set(["planning", "executing", "completed", "cancelled"]);
+const modes = new Set([
+  "planning",
+  "executing",
+  "handed_off",
+  "completed",
+  "cancelled",
+]);
 const statuses = new Set(["pending", "in_progress", "done", "blocked"]);
 export function isWork(value: any): value is Work {
   return Boolean(
@@ -47,6 +56,11 @@ export function isWork(value: any): value is Work {
       (value.latestFailure === undefined ||
         typeof value.latestFailure === "string") &&
       (value.nextAction === undefined || typeof value.nextAction === "string") &&
+      (value.runId === undefined || typeof value.runId === "string") &&
+      (value.baseModel === undefined ||
+        (typeof value.baseModel?.provider === "string" &&
+          typeof value.baseModel?.id === "string")) &&
+      (value.baseThinking === undefined || typeof value.baseThinking === "string") &&
       (value.completedAt === undefined || typeof value.completedAt === "string") &&
       typeof value.createdAt === "string" &&
       typeof value.updatedAt === "string"

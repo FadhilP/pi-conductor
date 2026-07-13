@@ -24,10 +24,9 @@ import {
   type SessionIntent,
 } from "../src/sessions.ts";
 
-const checkpointExtension = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "scout-checkpoint.ts",
-);
+const extensionDir = dirname(fileURLToPath(import.meta.url));
+const checkpointExtension = join(extensionDir, "scout-checkpoint.ts");
+const searchToolsExtension = join(extensionDir, "search-tools.ts");
 function modelName(model: { provider: string; id: string }): string {
   return `${model.provider}/${model.id}`;
 }
@@ -301,11 +300,13 @@ export default function (pi: ExtensionAPI) {
             "--no-extensions",
             "-e",
             checkpointExtension,
+            "-e",
+            searchToolsExtension,
             "--no-skills",
             "--no-prompt-templates",
             "--no-context-files",
             "--tools",
-            "read,grep,find,ls,scout_checkpoint",
+            "read,rg,fd,grep,find,ls,scout_checkpoint",
             "--model",
             modelName(model),
             "--thinking",

@@ -1,5 +1,7 @@
 export const INSPECTION = new Set([
   "read",
+  "rg",
+  "fd",
   "grep",
   "find",
   "ls",

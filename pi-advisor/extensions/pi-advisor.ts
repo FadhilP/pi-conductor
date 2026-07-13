@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { ADVISOR_PROMPT, capAdvice } from "../src/advisor.ts";
+import { ADVISOR_MAX_CALLS, ADVISOR_PROMPT, capAdvice } from "../src/advisor.ts";
 import {
   loadConfig,
   parseModelRef,
@@ -37,7 +37,7 @@ type Details = {
     cacheWrite: number;
     cost: number;
   };
-  callNumber: 1 | 2;
+  callNumber: 1 | 2 | 3;
   snapshotEstimatedTokens: number;
   redactionCount: number;
   truncated: boolean;
@@ -114,11 +114,11 @@ export default function (pi: ExtensionAPI) {
     name: "advisor",
     label: "Advisor",
     description:
-      "Consult configured tool-free strategic advisor using a redacted bounded snapshot of current executor context plus optional high-priority workspace file ranges. Maximum two calls per original user prompt.",
+      "Consult configured tool-free strategic advisor using a redacted bounded snapshot of current executor context plus optional high-priority workspace file ranges. Maximum three calls per original user prompt.",
     promptSnippet:
       "Consult selected strategic model for difficult planning, review, or failure recovery",
     promptGuidelines: [
-      "Use advisor only for genuine strategic uncertainty in a complex task. Prefer first advisor call after focused reads or repo_scout results establish evidence and the main model has formed a tentative assessment; pass only highest-priority cited file ranges through evidence so Advisor can inspect primary source. Advisor should critique that evidence, reasoning, risks, and proposed direction before planning or editing. For difficult tasks, use second advisor call after implementation and relevant test output to review course or diagnose failure. Scout gathers evidence, main model makes the initial judgment, Advisor challenges it, and main model owns the final decision. Do not use advisor for trivial, local, or single-turn work. Advisor recommends; verify evidence and perform tools yourself.",
+      "Use advisor for consequential non-local decisions, difficult planning, review, or failure recovery; skip trivial, local, or single-turn work. First call: after focused reads or repo_scout establish evidence, before choosing an approach. Second call: use when implementation, competing evidence, or review changes the decision; do not wait for completion. Third call: reserve for material new evidence, contradictions, or test/failure results that leave the decision unresolved. Pass only highest-priority cited file ranges through evidence so Advisor can inspect primary source. Advisor critiques evidence, reasoning, risks, and proposed direction; Scout gathers evidence, main model owns the final decision. Advisor recommends; verify evidence and perform tools yourself.",
     ],
     parameters: Type.Object(
       {
@@ -139,10 +139,10 @@ export default function (pi: ExtensionAPI) {
       { additionalProperties: false },
     ),
     async execute(_id, params, signal, onUpdate, ctx) {
-      const callNumber = (calls + 1) as 1 | 2;
+      const callNumber = Math.min(calls + 1, ADVISOR_MAX_CALLS) as Details["callNumber"];
       const cacheRetention: "short" | "long" =
         process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
-      if (calls >= 2)
+      if (calls >= ADVISOR_MAX_CALLS)
         return {
           content: [
             {
@@ -153,7 +153,7 @@ export default function (pi: ExtensionAPI) {
           details: {
             durationMs: 0,
             usage: emptyUsage(),
-            callNumber: 2,
+            callNumber: ADVISOR_MAX_CALLS,
             snapshotEstimatedTokens: 0,
             redactionCount: 0,
             truncated: false,
@@ -206,11 +206,17 @@ export default function (pi: ExtensionAPI) {
           customType: "advisor-evidence",
           content: evidence,
         });
-      const priorTokens = Math.ceil((previousAdvice?.length ?? 0) / 4);
+      const continuationPrefix = previousAdvice
+        ? `Continue as the same advisor. Prior guidance:\n\n${previousAdvice}\n\nCurrent executor snapshot:\n\n`
+        : "";
+      const reservedInputTokens = Math.ceil(
+        (ADVISOR_PROMPT.length + continuationPrefix.length) / 4,
+      ) + 256;
       const snapshot = buildSnapshot(
         ctx.getSystemPrompt(),
         messages,
-        Math.max(1000, model.contextWindow - priorTokens),
+        model.contextWindow,
+        reservedInputTokens,
       );
       if (ctx.hasUI)
         ctx.ui.setStatus(
@@ -241,9 +247,7 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: previousAdvice
-                ? `Continue as the same advisor. Prior guidance:\n\n${previousAdvice}\n\nCurrent executor snapshot:\n\n${snapshot.text}`
-                : snapshot.text,
+              text: `${continuationPrefix}${snapshot.text}`,
             },
           ],
           timestamp: Date.now(),
@@ -359,10 +363,13 @@ export default function (pi: ExtensionAPI) {
         if (ctx.hasUI) ctx.ui.setStatus("pi-advisor", undefined);
       }
     },
-    renderCall(_args, theme) {
+    renderCall(_args, theme, context) {
+      const callNumber = (context.state.callNumber as number | undefined) ??
+        Math.min(calls + 1, ADVISOR_MAX_CALLS);
+      context.state.callNumber = callNumber;
       return new Text(
         theme.fg("toolTitle", theme.bold("Advisor ")) +
-          theme.fg("muted", `call ${Math.min(calls + 1, 2)}/2`),
+          theme.fg("muted", `call ${callNumber}/${ADVISOR_MAX_CALLS}`),
         0,
         0,
       );
@@ -375,7 +382,7 @@ export default function (pi: ExtensionAPI) {
       if (!details) return new Text(body?.text ?? "Advisor", 0, 0);
       let text = theme.fg(
         details.failureCode ? "warning" : "success",
-        `Advisor · ${details.advisorModel ?? "unavailable"} · call ${details.callNumber}/2`,
+        `Advisor · ${details.advisorModel ?? "unavailable"} · call ${details.callNumber}/${ADVISOR_MAX_CALLS}`, 
       );
       if (!details.failureCode)
         text += theme.fg(
@@ -406,7 +413,7 @@ export default function (pi: ExtensionAPI) {
         const config = await loadConfig();
         const model = await configuredModel(ctx);
         ctx.ui.notify(
-          `Selected: ${config.advisorModel ?? "none"}\nThinking: ${config.thinking ?? "provider default"}\nState: ${model && ctx.modelRegistry.hasConfiguredAuth(model) ? "active" : "inactive"}\nLimit: 2 calls per original user prompt`,
+          `Selected: ${config.advisorModel ?? "none"}\nThinking: ${config.thinking ?? "provider default"}\nState: ${model && ctx.modelRegistry.hasConfiguredAuth(model) ? "active" : "inactive"}\nLimit: ${ADVISOR_MAX_CALLS} calls per original user prompt`,
           "info",
         );
         return;

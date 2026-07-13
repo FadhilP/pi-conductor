@@ -7,7 +7,7 @@
   "engines": { "node": ">=22.18.0" },
   "files": ["extensions", "src", "README.md", "LICENSE"],
   "scripts": { "test": "node --test test/*.test.ts", "check": "tsc --noEmit" },
-  "pi": { "extensions": ["./extensions/pi-scout.ts"] },
+  "pi": { "extensions": ["./extensions/search-tools.ts", "./extensions/pi-scout.ts"] },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",

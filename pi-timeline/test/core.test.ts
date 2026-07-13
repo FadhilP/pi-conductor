@@ -8,8 +8,33 @@ import { promisify } from "node:util";
 import { capture } from "../src/snapshot.ts";
 import { restore } from "../src/restore.ts";
 import { preflight } from "../src/safety.ts";
+import { findRunEntry, isRunEntry } from "../src/run.ts";
 
 const exec = promisify(execFile);
+
+test("run metadata is optional and latest valid entry wins", () => {
+  assert.equal(findRunEntry([]), undefined);
+  const planner = {
+    version: 1 as const,
+    runId: "run-1",
+    role: "planner" as const,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+  const executor = {
+    ...planner,
+    role: "executor" as const,
+    parentSessionId: "planner-session",
+  };
+  assert.equal(isRunEntry(planner), true);
+  assert.deepEqual(
+    findRunEntry([
+      { type: "custom", customType: "pi-conductor-run", data: planner },
+      { type: "custom", customType: "other", data: {} },
+      { type: "custom", customType: "pi-conductor-run", data: executor },
+    ]),
+    executor,
+  );
+});
 
 async function repository() {
   const root = await mkdtemp(join(tmpdir(), "pi-timeline-test-"));

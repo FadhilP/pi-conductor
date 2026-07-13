@@ -24,6 +24,57 @@ import {
   sessionWorkFile,
 } from "../src/active-work.ts";
 import { validateQuestion } from "../src/questions.ts";
+import {
+  defaultConfig,
+  loadConfig,
+  parseModelRef,
+  saveConfig,
+} from "../src/config.ts";
+import { isRunEntry } from "../src/run.ts";
+test("model profiles parse, persist, and reset to defaults", async () => {
+  assert.deepEqual(parseModelRef("provider/model:high"), {
+    provider: "provider",
+    id: "model",
+    thinking: "high",
+  });
+  assert.deepEqual(parseModelRef("provider/model:version"), {
+    provider: "provider",
+    id: "model:version",
+  });
+  const root = await mkdtemp(join(tmpdir(), "continuity-config-"));
+  const path = join(root, "config.json");
+  await saveConfig(
+    {
+      version: 1,
+      planner: { model: "provider/planner", thinking: "high" },
+      executor: { model: "provider/executor" },
+    },
+    path,
+  );
+  assert.deepEqual(await loadConfig(path), {
+    version: 1,
+    planner: { model: "provider/planner", thinking: "high" },
+    executor: { model: "provider/executor" },
+  });
+  assert.deepEqual(defaultConfig(), { version: 1 });
+});
+
+test("run metadata validates", () => {
+  assert.equal(
+    isRunEntry({
+      version: 1,
+      runId: "run",
+      role: "planner",
+      createdAt: new Date().toISOString(),
+    }),
+    true,
+  );
+  assert.equal(
+    isRunEntry({ version: 1, runId: "run", role: "invalid", createdAt: "x" }),
+    false,
+  );
+});
+
 test("session work files are isolated", () => {
   assert.notEqual(sessionWorkFile("session-a"), sessionWorkFile("session-b"));
   assert.equal(sessionWorkFile("../session"), "..%2Fsession.json");
@@ -192,6 +243,15 @@ test("secret rejected", () =>
 
 test("work schema rejects malformed persisted state", () => {
   assert.equal(isWork(fresh("goal")), true);
+  assert.equal(
+    isWork({
+      ...fresh("goal"),
+      runId: "run",
+      baseModel: { provider: "provider", id: "model" },
+      baseThinking: "high",
+    }),
+    true,
+  );
   assert.equal(isWork({ ...fresh("goal"), schemaVersion: 2 }), false);
   assert.equal(isWork({ ...fresh("goal"), todos: [{ bad: true }] }), false);
 });

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
@@ -36,6 +37,19 @@ import { assertSafe } from "../src/secrets.ts";
 import { blocked, planningTools } from "../src/plan-gate.ts";
 import { buildContext } from "../src/context.ts";
 import { validateQuestion } from "../src/questions.ts";
+import {
+  loadConfig,
+  parseModelRef,
+  saveConfig,
+  thinkingLevels,
+  type ModelProfile,
+  type ThinkingLevel,
+} from "../src/config.ts";
+import {
+  HANDOFF_ENTRY_TYPE,
+  RUN_ENTRY_TYPE,
+  type RunEntry,
+} from "../src/run.ts";
 const Kind = StringEnum([
     "workflow",
     "structure",
@@ -63,7 +77,30 @@ export default function (pi: ExtensionAPI) {
     parentFacts: Fact[] = [],
     candidates: Candidate[] = [],
     savedTools: string[] | undefined,
-    lastPrompt = "";
+    lastPrompt = "",
+    lastOfferedPlan = "",
+    selectionOpen = false;
+  const modelName = (model: any) => `${model.provider}/${model.id}`;
+  const configuredModel = async (
+    ctx: any,
+    profile: ModelProfile | undefined,
+    fallback?: { provider: string; id: string },
+  ) => {
+    const ref = profile ? parseModelRef(profile.model) : fallback;
+    const model = ref && ctx.modelRegistry.find(ref.provider, ref.id);
+    if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) return undefined;
+    return model;
+  };
+  const applyProfile = async (
+    ctx: any,
+    profile: ModelProfile | undefined,
+  ) => {
+    if (!profile) return true;
+    const model = await configuredModel(ctx, profile);
+    if (!model || !(await pi.setModel(model))) return false;
+    if (profile.thinking) pi.setThinkingLevel(profile.thinking);
+    return true;
+  };
   const paths = () => ({
     work: workFile,
     memory: join(dir, "memory.json"),
@@ -87,7 +124,7 @@ export default function (pi: ExtensionAPI) {
     if (ctx.mode === "tui")
       ctx.ui.setWidget(
         "pi-continuity",
-        work && !["completed", "cancelled"].includes(work.mode)
+        work && !["handed_off", "completed", "cancelled"].includes(work.mode)
           ? [
               "Tasks",
               ...work.todos.map(
@@ -179,6 +216,26 @@ export default function (pi: ExtensionAPI) {
       undefined,
       (value) => value === undefined || isWork(value),
     );
+    const handoff = [...(ctx.sessionManager.getEntries?.() ?? [])]
+      .reverse()
+      .find(
+        (entry: any) =>
+          entry.type === "custom" &&
+          entry.customType === HANDOFF_ENTRY_TYPE &&
+          isWork(entry.data?.work),
+      ) as any;
+    if (handoff) {
+      work = handoff.data.work;
+      const requested = handoff.data.model;
+      const model =
+        requested &&
+        ctx.modelRegistry.find(requested.provider, requested.id);
+      if (model && ctx.modelRegistry.hasConfiguredAuth(model))
+        await pi.setModel(model);
+      if (thinkingLevels.includes(handoff.data.thinking))
+        pi.setThinkingLevel(handoff.data.thinking);
+      await saveWork();
+    }
     facts = (
       await readJson(p.memory, { schemaVersion: 1 as const, facts: [] as Fact[] }, isMemoryFile)
     ).facts;
@@ -215,6 +272,39 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled", async (_e, ctx) => {
     hideTasks(ctx);
     await compactMemory();
+    if (
+      ctx.mode !== "tui" ||
+      selectionOpen ||
+      work?.mode !== "planning" ||
+      !work.planSummary ||
+      !work.todos.length
+    )
+      return;
+    const fingerprint = JSON.stringify([
+      work.planSummary,
+      work.todos.map((todo) => todo.text),
+    ]);
+    if (fingerprint === lastOfferedPlan) return;
+    lastOfferedPlan = fingerprint;
+    selectionOpen = true;
+    try {
+      const choice = await ctx.ui.select("Plan ready", [
+        "Approve — fresh executor session",
+        "Approve — continue current session",
+        "Request changes",
+      ]);
+      if (choice === "Approve — fresh executor session")
+        pi.sendUserMessage("/plan approve");
+      else if (choice === "Approve — continue current session")
+        pi.sendUserMessage("/plan approve-current");
+      else if (choice === "Request changes") {
+        const feedback = await ctx.ui.editor("Plan feedback", "");
+        if (feedback?.trim())
+          pi.sendUserMessage(`Plan changes requested:\n${feedback.trim()}`);
+      }
+    } finally {
+      selectionOpen = false;
+    }
   });
   pi.on("tool_call", (event) => {
     if (blocked(work?.mode === "planning", event.toolName))
@@ -228,7 +318,7 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("context", (event) => {
     const activeWork =
-      work && !["completed", "cancelled"].includes(work.mode)
+      work && !["handed_off", "completed", "cancelled"].includes(work.mode)
         ? work
         : undefined;
     const text = buildContext(activeWork, facts, lastPrompt, 900, parentFacts);
@@ -256,7 +346,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "Update plan, todos, state, clarification, or durable-memory candidate.",
     promptGuidelines: [
-      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list without activating the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. During execution, use exact todo IDs from Continuity context: mark one todo in_progress before work, then mark it done immediately after verification. Before final response, update every todo touched this turn and set completion true when none remain. Record concise failures/next action. Propose memory only for explicit user preferences, verified project commands, stable architecture boundaries, repeated corrections, or recurring warnings. Require user or repository/tool evidence in source. Never save task progress, guesses, one-time errors, temporary file state, repository-obvious facts, or secrets. Reuse stable keys; add and replace both set one fact per key.",
+      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list without activating the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. During execution, use exact todo IDs from Continuity context: mark one todo in_progress before work, then mark it done immediately after verification. Before final response, update every todo touched this turn and set completion true when none remain. Record concise failures/next action. Propose memory only when all three hold: evidence supports it (user instruction, verified repository/tool evidence, or repeated observation); it is likely true and useful in future sessions; it changes a future decision or avoids repeated work. Include evidence in source. Good candidates include user preferences, validated commands, project conventions, canonical paths, architecture boundaries, recurring warnings, and durable tool limitations. Never save task progress, guesses, one-time errors, temporary file state, generic facts, duplicates, or secrets. Reuse stable keys; add and replace both set one fact per key.",
     ],
     renderShell: "self",
     renderCall: () => new Container(),
@@ -453,17 +543,102 @@ export default function (pi: ExtensionAPI) {
     description: "Start, approve, cancel, or inspect plan",
     handler: async (args, ctx) => {
       const value = args.trim();
-      if (value === "approve") {
+      if (value === "approve-current") {
         if (!work?.planSummary)
           return void ctx.ui.notify("No stored plan.", "error");
+        const config = await loadConfig();
+        const executor = await configuredModel(
+          ctx,
+          config.executor,
+          work.baseModel,
+        );
+        if (!executor || !(await pi.setModel(executor)))
+          return void ctx.ui.notify("Executor model unavailable.", "error");
+        const thinking = config.executor?.thinking ?? work.baseThinking;
+        if (thinking) pi.setThinkingLevel(thinking as ThinkingLevel);
         work.mode = "executing";
         work.approved = true;
+        work.updatedAt = new Date().toISOString();
         await saveWork();
+        if (work.runId)
+          pi.appendEntry(RUN_ENTRY_TYPE, {
+            version: 1,
+            runId: work.runId,
+            role: "executor",
+            parentSessionId: ctx.sessionManager.getSessionId(),
+            createdAt: new Date().toISOString(),
+          } satisfies RunEntry);
         gate(false);
         refresh(ctx);
         pi.sendUserMessage(
-          "Execute approved stored plan. Track and verify todos.",
+          "Execute approved stored plan in current session. Track and verify todos.",
         );
+        return;
+      }
+      if (value === "approve") {
+        if (!work?.planSummary)
+          return void ctx.ui.notify("No stored plan.", "error");
+        const config = await loadConfig();
+        const executor = await configuredModel(
+          ctx,
+          config.executor,
+          work.baseModel,
+        );
+        if (!executor)
+          return void ctx.ui.notify("Executor model unavailable.", "error");
+        const sourceSessionId = ctx.sessionManager.getSessionId();
+        const sourceSessionFile = ctx.sessionManager.getSessionFile();
+        const sourceWorkFile = workFile;
+        const now = new Date().toISOString();
+        const childWork: Work = {
+          ...work,
+          mode: "executing",
+          approved: true,
+          updatedAt: now,
+        };
+        const run: RunEntry = {
+          version: 1,
+          runId: childWork.runId ?? randomUUID(),
+          role: "executor",
+          parentSessionId: sourceSessionId,
+          createdAt: now,
+        };
+        childWork.runId = run.runId;
+        const thinking = config.executor?.thinking ?? work.baseThinking;
+        const result = await ctx.newSession({
+          parentSession: sourceSessionFile,
+          setup: async (sessionManager) => {
+            sessionManager.appendModelChange(executor.provider, executor.id);
+            if (thinking) sessionManager.appendThinkingLevelChange(thinking);
+            sessionManager.appendCustomEntry(RUN_ENTRY_TYPE, run);
+            sessionManager.appendCustomEntry(HANDOFF_ENTRY_TYPE, {
+              version: 1,
+              work: childWork,
+              model: { provider: executor.provider, id: executor.id },
+              ...(thinking ? { thinking } : {}),
+            });
+          },
+          withSession: async (fresh) => {
+            if (
+              fresh.model?.provider !== executor.provider ||
+              fresh.model?.id !== executor.id
+            )
+              throw new Error("Executor model was not selected in child session.");
+            await fresh.sendUserMessage(
+              "Execute approved stored plan. Track and verify todos.",
+            );
+          },
+        });
+        if (!result.cancelled) {
+          const plannerWork: Work = {
+            ...work,
+            mode: "handed_off",
+            approved: true,
+            runId: run.runId,
+            updatedAt: new Date().toISOString(),
+          };
+          await writeJson(sourceWorkFile, plannerWork);
+        }
         return;
       }
       if (value === "cancel") {
@@ -475,6 +650,13 @@ export default function (pi: ExtensionAPI) {
         refresh(ctx);
         return;
       }
+      if (value.startsWith("deny")) {
+        const feedback = value.slice("deny".length).trim();
+        if (!feedback)
+          return void ctx.ui.notify("Plan feedback required.", "error");
+        pi.sendUserMessage(`Plan changes requested:\n${feedback}`);
+        return;
+      }
       if (value === "status") {
         ctx.ui.notify(
           work ? `${work.mode}: ${work.goal}` : "No active work.",
@@ -482,7 +664,27 @@ export default function (pi: ExtensionAPI) {
         );
         return;
       }
+      const config = await loadConfig();
+      const baseModel = ctx.model && {
+        provider: ctx.model.provider,
+        id: ctx.model.id,
+      };
+      const baseThinking = pi.getThinkingLevel();
+      if (!(await applyProfile(ctx, config.planner))) {
+        ctx.ui.notify("Planner model unavailable.", "error");
+        return;
+      }
       work = fresh(value);
+      work.runId = randomUUID();
+      work.baseModel = baseModel;
+      work.baseThinking = baseThinking;
+      const run: RunEntry = {
+        version: 1,
+        runId: work.runId,
+        role: "planner",
+        createdAt: new Date().toISOString(),
+      };
+      pi.appendEntry(RUN_ENTRY_TYPE, run);
       savedTools = pi.getActiveTools();
       gate(true);
       await saveWork();
@@ -491,6 +693,78 @@ export default function (pi: ExtensionAPI) {
         pi.sendUserMessage(
           `Plan this task without modifying project files: ${value}`,
         );
+    },
+  });
+  pi.registerCommand("continuity", {
+    description: "Configure planner/executor models or show status",
+    handler: async (args, ctx) => {
+      const [roleRaw, ...rest] = args.trim().split(/\s+/);
+      const role = roleRaw as "planner" | "executor";
+      const value = rest.join(" ");
+      const config = await loadConfig();
+      if (!roleRaw || roleRaw === "status") {
+        ctx.ui.notify(
+          `Planner: ${config.planner?.model ?? "current session model"} · thinking: ${config.planner?.thinking ?? "current session level"}\nExecutor: ${config.executor?.model ?? "current session model"} · thinking: ${config.executor?.thinking ?? "current session level"}`,
+          "info",
+        );
+        return;
+      }
+      if (!(["planner", "executor"] as string[]).includes(role)) {
+        ctx.ui.notify(
+          "Usage: /continuity [status|planner|executor] [provider/model[:thinking]|reset]",
+          "info",
+        );
+        return;
+      }
+      if (value === "reset") {
+        const next = { ...config };
+        delete next[role];
+        await saveConfig(next);
+        ctx.ui.notify(
+          `${role} reset; uses current session model and thinking.`,
+          "info",
+        );
+        return;
+      }
+      let selected = value;
+      if (!selected && ctx.mode === "tui")
+        selected =
+          (await ctx.ui.select(
+            `${role} model`,
+            ctx.modelRegistry.getAvailable().map(modelName),
+          )) ?? "";
+      if (!selected) {
+        ctx.ui.notify(
+          `Usage: /continuity ${role} <provider/model[:thinking]>|reset`,
+          "info",
+        );
+        return;
+      }
+      const ref = parseModelRef(selected);
+      const model = ref && ctx.modelRegistry.find(ref.provider, ref.id);
+      if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
+        ctx.ui.notify(`Unavailable model: ${selected}`, "error");
+        return;
+      }
+      let thinking: ThinkingLevel | undefined = ref.thinking;
+      if (!value && ctx.mode === "tui") {
+        thinking = (await ctx.ui.select(
+          `${role} thinking level`,
+          [...thinkingLevels],
+        )) as ThinkingLevel | undefined;
+        if (!thinking) return;
+      }
+      await saveConfig({
+        ...config,
+        [role]: {
+          model: modelName(model),
+          ...(thinking ? { thinking } : {}),
+        },
+      });
+      ctx.ui.notify(
+        `${role}: ${modelName(model)} · thinking: ${thinking ?? "current session level"}`,
+        "info",
+      );
     },
   });
   pi.registerCommand("todos", {

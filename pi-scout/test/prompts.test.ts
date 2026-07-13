@@ -8,6 +8,9 @@ test("repo scout requires bounded cited evidence", () => {
   assert.match(REPO_SCOUT_PROMPT, /under 20 lines/i);
   assert.match(REPO_SCOUT_PROMPT, /Never paste whole files/i);
   assert.match(REPO_SCOUT_PROMPT, /Gaps:/);
+  assert.match(REPO_SCOUT_PROMPT, /Prefer rg/);
+  assert.match(REPO_SCOUT_PROMPT, /fd for path discovery/);
+  assert.match(REPO_SCOUT_PROMPT, /fall back to grep\/find/);
   assert.match(REPO_SCOUT_PROMPT, /scout_checkpoint/);
   assert.match(REPO_SCOUT_PROMPT, /never include raw reads/i);
   assert.match(REPO_SCOUT_PROMPT, /do not assign severity/i);

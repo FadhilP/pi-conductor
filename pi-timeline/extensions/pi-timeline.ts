@@ -1,8 +1,17 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  SessionManager,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { capture, type Snapshot } from "../src/snapshot.ts";
 import { restore } from "../src/restore.ts";
 import { promptText, promptTitle } from "../src/prompts.ts";
 import { git } from "../src/git.ts";
+import {
+  findRunEntry,
+  isRunEntry,
+  RUN_ENTRY_TYPE,
+  type RunEntry,
+} from "../src/run.ts";
 type RecordV3 = Snapshot & {
   version: 3;
   kind: "pi-prompt-checkpoint";
@@ -11,7 +20,14 @@ type RecordV3 = Snapshot & {
   continuationEntryId: string;
   createdAt: string;
 };
-type Bound = { record: RecordV3; checkpointEntryId: string; preview: string };
+type Bound = {
+  record: RecordV3;
+  checkpointEntryId: string;
+  preview: string;
+  sessionId: string;
+  sessionPath?: string;
+  role?: RunEntry["role"];
+};
 type ClearV1 = {
   version: 1;
   ownerSessionId: string;
@@ -21,31 +37,77 @@ export default function (pi: ExtensionAPI) {
   let records = new Map<string, Bound>(),
     paired = false,
     namingDecided = false,
-    pendingContext = "";
-  const load = (ctx: any) => {
-    records = new Map();
-    const entries = ctx.sessionManager.getEntries(),
-      byId = new Map(entries.map((e: any) => [e.id, e]));
-    for (const e of entries) {
+    pendingContext = "",
+    activeRun: RunEntry | undefined;
+  const key = (sessionId: string, entryId: string) => `${sessionId}:${entryId}`;
+  const loadEntries = (
+    entries: readonly any[],
+    sessionId: string,
+    sessionPath?: string,
+    role?: RunEntry["role"],
+  ) => {
+    const byId = new Map(entries.map((entry: any) => [entry.id, entry]));
+    let checkpointRole = role;
+    for (const entry of entries) {
       if (
-        e.type === "custom" &&
-        e.customType === "pi-prompt-checkpoint" &&
-        e.data?.version === 3
+        entry.type === "custom" &&
+        entry.customType === RUN_ENTRY_TYPE &&
+        isRunEntry(entry.data)
       ) {
-        const u = byId.get(e.data.promptEntryId) as any;
-        if (u?.type === "message" && u.message.role === "user")
-          records.set(e.id, {
-            record: e.data,
-            checkpointEntryId: e.id,
-            preview: promptText(u.message),
+        checkpointRole = entry.data.role;
+      } else if (
+        entry.type === "custom" &&
+        entry.customType === "pi-prompt-checkpoint" &&
+        entry.data?.version === 3
+      ) {
+        const user = byId.get(entry.data.promptEntryId) as any;
+        if (user?.type === "message" && user.message.role === "user")
+          records.set(key(sessionId, entry.id), {
+            record: entry.data,
+            checkpointEntryId: entry.id,
+            preview: promptText(user.message),
+            sessionId,
+            sessionPath,
+            role: checkpointRole,
           });
       } else if (
-        e.type === "custom" &&
-        e.customType === "pi-timeline-clear" &&
-        e.data?.version === 1
+        entry.type === "custom" &&
+        entry.customType === "pi-timeline-clear" &&
+        entry.data?.version === 1
       )
-        for (const id of e.data.checkpointEntryIds ?? []) records.delete(id);
+        for (const id of entry.data.checkpointEntryIds ?? [])
+          records.delete(key(sessionId, id));
     }
+  };
+  const load = async (ctx: any) => {
+    records = new Map();
+    const currentEntries = ctx.sessionManager.getEntries();
+    activeRun = findRunEntry(currentEntries);
+    if (!activeRun) {
+      loadEntries(
+        currentEntries,
+        ctx.sessionManager.getSessionId(),
+        ctx.sessionManager.getSessionFile(),
+      );
+      return;
+    }
+    const sessions = await SessionManager.list(ctx.cwd);
+    for (const session of sessions) {
+      try {
+        const manager = SessionManager.open(session.path);
+        const entries = manager.getEntries();
+        const run = findRunEntry(entries);
+        if (run?.runId === activeRun.runId)
+          loadEntries(entries, session.id, session.path);
+      } catch {}
+    }
+    if (!sessions.some((session) => session.id === ctx.sessionManager.getSessionId()))
+      loadEntries(
+        currentEntries,
+        ctx.sessionManager.getSessionId(),
+        ctx.sessionManager.getSessionFile(),
+        activeRun.role,
+      );
   };
   const refresh = (ctx: any) => {
     if (ctx.hasUI)
@@ -68,9 +130,14 @@ export default function (pi: ExtensionAPI) {
           (e: any) => e.type === "message" && e.message.role === "user",
         ) as any;
     if (!user) return;
+    const currentSessionId = ctx.sessionManager.getSessionId();
     const existing = [...records.values()]
       .reverse()
-      .find((bound) => bound.record.promptEntryId === user.id);
+      .find(
+        (bound) =>
+          bound.sessionId === currentSessionId &&
+          bound.record.promptEntryId === user.id,
+      );
     if (paired && existing) return existing.record;
     const continuation = ctx.sessionManager.getLeafId();
     try {
@@ -86,10 +153,13 @@ export default function (pi: ExtensionAPI) {
         };
       pi.appendEntry("pi-prompt-checkpoint", record);
       const checkpointEntryId = ctx.sessionManager.getLeafId()!;
-      records.set(checkpointEntryId, {
+      records.set(key(currentSessionId, checkpointEntryId), {
         record,
         checkpointEntryId,
         preview: promptText(user.message),
+        sessionId: currentSessionId,
+        sessionPath: ctx.sessionManager.getSessionFile(),
+        role: activeRun?.role,
       });
       paired = true;
       refresh(ctx);
@@ -99,8 +169,8 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Timeline checkpoint skipped: ${e.message}`, "warning");
     }
   }
-  pi.on("session_start", (_e, ctx) => {
-    load(ctx);
+  pi.on("session_start", async (_e, ctx) => {
+    await load(ctx);
     paired = false;
     namingDecided = ctx.sessionManager
       .getEntries()
@@ -157,12 +227,17 @@ export default function (pi: ExtensionAPI) {
     description: "List, view, fork, or clear Git-backed prompt checkpoints",
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
-      load(ctx);
+      await load(ctx);
       const [actionRaw, idRaw] = args.trim().split(/\s+/, 2),
         action = actionRaw || "select";
       if (action === "list") {
         ctx.ui.notify(
-          [...records].map(([id, b]) => `${id} ${b.preview}`).join("\n") ||
+          [...records]
+            .map(
+              ([id, bound]) =>
+                `${id} ${bound.role ? `[${bound.role}] ` : ""}${bound.preview}`,
+            )
+            .join("\n") ||
             "No checkpoints.",
           "info",
         );
@@ -186,7 +261,7 @@ export default function (pi: ExtensionAPI) {
         const cleared: ClearV1 = {
           version: 1,
           ownerSessionId: ctx.sessionManager.getSessionId(),
-          checkpointEntryIds: owned.map(([id]) => id),
+          checkpointEntryIds: owned.map(([, bound]) => bound.checkpointEntryId),
         };
         pi.appendEntry("pi-timeline-clear", cleared);
         for (const [id] of owned) records.delete(id);
@@ -205,7 +280,10 @@ export default function (pi: ExtensionAPI) {
       if (action === "select") {
         id = await ctx.ui.select(
           "Checkpoint",
-          [...records].map(([id, b]) => `${id} ${b.preview}`),
+          [...records].map(
+            ([id, bound]) =>
+              `${id} ${bound.role ? `[${bound.role}] ` : ""}${bound.preview}`,
+          ),
         );
         id = id?.split(" ")[0];
         if (!id) return;
@@ -230,7 +308,60 @@ export default function (pi: ExtensionAPI) {
         `${target.preview}\nCurrent dirty state is checkpointed. Ignored files stay untouched.`,
       );
       if (!ok) return;
-      if (mode === "jump") {
+      const foreign =
+        target.sessionId !== ctx.sessionManager.getSessionId() &&
+        target.sessionPath;
+      if (foreign) {
+        await ctx.switchSession(target.sessionPath!, {
+          withSession: async (fresh) => {
+            if (mode === "jump") {
+              try {
+                await fresh.navigateTree(target.record.continuationEntryId, {
+                  summarize: false,
+                });
+                await restore(target.record, fresh.cwd);
+                await fresh.sendMessage(
+                  {
+                    customType: "pi-timeline",
+                    content: `Filesystem restored from linked run checkpoint ${id}.`,
+                    display: false,
+                  },
+                  { deliverAs: "nextTurn" },
+                );
+              } catch (e: any) {
+                await restore(source, fresh.cwd).catch(() => {});
+                fresh.ui.notify(
+                  `Timeline restore failed; source files restored: ${e.message}`,
+                  "error",
+                );
+              }
+            } else {
+              await fresh.fork(target.checkpointEntryId, {
+                position: "at",
+                withSession: async (child) => {
+                  try {
+                    await restore(target.record, child.cwd);
+                    await child.sendMessage(
+                      {
+                        customType: "pi-timeline",
+                        content: `Filesystem restored in forked Pi session from linked run checkpoint ${id}.`,
+                        display: false,
+                      },
+                      { deliverAs: "nextTurn" },
+                    );
+                  } catch (e: any) {
+                    await restore(source, child.cwd).catch(() => {});
+                    child.ui.notify(
+                      `Child restore failed; source files restored: ${e.message}`,
+                      "error",
+                    );
+                  }
+                },
+              });
+            }
+          },
+        });
+      } else if (mode === "jump") {
         const old = ctx.sessionManager.getLeafId();
         try {
           await ctx.navigateTree(target.record.continuationEntryId, {
