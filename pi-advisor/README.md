@@ -34,9 +34,9 @@ Evidence is limited to five workspace-relative regular text files, 200 lines per
 
 ## Context and Limits
 
-Input priority is the executor request, explicit workspace evidence, pi-continuity state, latest bounded Verify metadata, compaction or branch summaries, latest user request, latest non-empty assistant text, then system instructions. Raw tool and shell results are excluded. Latest user request uses head-and-tail retention under an estimated 8k-token cap.
+Input priority is the executor request, explicit workspace evidence, pi-continuity state, latest bounded Verify metadata, compaction or branch summaries, latest user request, latest non-empty assistant text, then system instructions. Raw tool and shell results are excluded. Advisor requests use an estimated 2,048-token cap; latest user requests use head-and-tail retention under an estimated 4,096-token cap.
 
-Calls use context-window-aware budgets with an estimated 32k-token total input cap. Output is capped at 8k tokens. Calls time out after 15 minutes and fail nonfatally.
+Calls use context-window-aware budgets with an estimated 32,768-token total input cap. Output is capped at an estimated 8,192 tokens. Calls time out after 15 minutes and fail nonfatally.
 
 ## Security and Cost
 

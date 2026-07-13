@@ -8,18 +8,15 @@ export type Fact = {
   confidence: number;
   updatedAt: string;
 };
-export type Candidate = Fact & {
+export type PendingCandidate = Fact & {
   id: string;
   action: "add" | "replace" | "remove";
-  status: "pending" | "applied" | "rejected";
   createdAt: string;
-  decidedAt?: string;
 };
 export type MemoryFile = { schemaVersion: 1; facts: Fact[]; updatedAt?: string };
-export type CandidatesFile = { schemaVersion: 1; candidates: Candidate[] };
+export type CandidatesFile = { schemaVersion: 1; candidates: PendingCandidate[] };
 const kinds = new Set(["workflow", "structure", "architecture", "warning", "preference"]);
 const actions = new Set(["add", "replace", "remove"]);
-const statuses = new Set(["pending", "applied", "rejected"]);
 const safeStrings = (...values: string[]) => {
   try { assertSafe(...values); return true; } catch { return false; }
 };
@@ -30,36 +27,47 @@ export function isFact(value: any): value is Fact {
     typeof value.confidence === "number" && value.confidence >= 0 && value.confidence <= 1 &&
     typeof value.updatedAt === "string" && safeStrings(value.key, value.text, value.source);
 }
-export function isCandidate(value: any): value is Candidate {
+function isCandidateBase(value: any): value is PendingCandidate {
   if (!isFact(value)) return false;
   const input = value as any;
   return typeof input.id === "string" && input.id &&
-    actions.has(input.action) && statuses.has(input.status) &&
-    typeof input.createdAt === "string" &&
-    (input.decidedAt === undefined || typeof input.decidedAt === "string");
+    actions.has(input.action) && typeof input.createdAt === "string";
 }
+export function normalizeCandidatesFile(value: any): CandidatesFile | undefined {
+  if (value?.schemaVersion !== 1 || !Array.isArray(value.candidates)) return;
+  const candidates: PendingCandidate[] = [];
+  for (const input of value.candidates) {
+    const { status, decidedAt } = input as any;
+    if (status === "applied" || status === "rejected") continue;
+    if (!isCandidateBase(input)) return;
+    if (status !== undefined && status !== "pending") return;
+    if (decidedAt !== undefined && typeof decidedAt !== "string") return;
+    const { key, kind, text, source, confidence, updatedAt, id, action, createdAt } = input;
+    candidates.push({ key, kind, text, source, confidence, updatedAt, id, action, createdAt });
+  }
+  return { schemaVersion: 1, candidates };
+}
+export const isCandidatesFile = (value: any): value is CandidatesFile =>
+  normalizeCandidatesFile(value) !== undefined;
 export const isMemoryFile = (value: any): value is MemoryFile =>
   value?.schemaVersion === 1 && Array.isArray(value.facts) && value.facts.every(isFact);
-export const isCandidatesFile = (value: any): value is CandidatesFile =>
-  value?.schemaVersion === 1 && Array.isArray(value.candidates) && value.candidates.every(isCandidate);
 const retentionPriority = (fact: Fact) =>
   fact.kind === "preference" ? 2 : fact.kind === "warning" ? 1 : 0;
 export function candidate(
-  input: Omit<Candidate, "id" | "status" | "createdAt" | "updatedAt">,
-): Candidate {
+  input: Omit<PendingCandidate, "id" | "createdAt" | "updatedAt">,
+): PendingCandidate {
   assertSafe(input.key, input.text, input.source);
   const now = new Date().toISOString();
   return {
     ...input,
     id: randomUUID(),
-    status: "pending",
     createdAt: now,
     updatedAt: now,
   };
 }
-export function compact(facts: Fact[], candidates: Candidate[], max = 80) {
+export function compact(facts: Fact[], candidates: PendingCandidate[], max = 80) {
   const keyed = new Map(facts.map((fact) => [fact.key, fact]));
-  for (const item of candidates.filter((item) => item.status === "pending")) {
+  for (const item of candidates) {
     if (item.action === "remove") keyed.delete(item.key);
     else
       keyed.set(item.key, {
@@ -79,5 +87,5 @@ export function compact(facts: Fact[], candidates: Candidate[], max = 80) {
         b.updatedAt.localeCompare(a.updatedAt),
     )
     .slice(0, max);
-  return { facts: kept, candidates: [] as Candidate[] };
+  return { facts: kept, candidates: [] as PendingCandidate[] };
 }

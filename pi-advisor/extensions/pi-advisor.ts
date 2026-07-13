@@ -125,7 +125,7 @@ export default function (pi: ExtensionAPI) {
       {
         request: Type.String({
           minLength: 1,
-          maxLength: 2_000,
+          maxLength: 8_192,
           description: "Concrete decision, risk, or approach for the advisor to review",
         }),
         evidence: Type.Optional(

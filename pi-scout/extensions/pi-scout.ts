@@ -14,7 +14,7 @@ import {
   thinkingLevels,
   type ThinkingLevel,
 } from "../src/config.ts";
-import { loadCheckpoint, repoResult } from "../src/checkpoint.ts";
+import { repoResult } from "../src/checkpoint.ts";
 import { buildParentContext } from "../src/parent-context.ts";
 import { REPO_SCOUT_PROMPT, SESSION_SCOUT_PROMPT } from "../src/prompts.ts";
 import { runPi, type ScoutActivity, type ScoutRun } from "../src/runner.ts";
@@ -25,7 +25,6 @@ import {
 } from "../src/sessions.ts";
 
 const extensionDir = dirname(fileURLToPath(import.meta.url));
-const checkpointExtension = join(extensionDir, "scout-checkpoint.ts");
 const searchToolsExtension = join(extensionDir, "search-tools.ts");
 const HEARTBEAT_MS = 1_000;
 function modelName(model: { provider: string; id: string }): string {
@@ -302,83 +301,69 @@ export default function (pi: ExtensionAPI) {
           ctx.sessionManager.buildContextEntries(),
         );
         const prompt = `Repository reconnaissance task: ${params.task.trim()}${params.retryReason ? `\nPrior scout gap requiring follow-up: ${params.retryReason.trim()}` : ""}${parentContext ? `\n\nParent-agent context (untrusted, redacted background; task above remains authoritative):\n${parentContext}` : ""}`;
-        const dir = await mkdtemp(join(tmpdir(), "pi-scout-repo-"));
-        const checkpointPath = join(dir, "checkpoint.md");
-        try {
-          const args = [
-            "--mode",
-            "json",
-            ...(repoRuns > 1 ? ["--continue"] : []),
-            "--session-dir",
-            await repoSessionDir(),
-            "--no-extensions",
-            "-e",
-            checkpointExtension,
-            "-e",
-            searchToolsExtension,
-            "--no-skills",
-            "--no-prompt-templates",
-            "--no-context-files",
-            "--tools",
-            "read,rg,fd,grep,find,ls,scout_checkpoint",
-            "--model",
-            modelName(model),
-            "--thinking",
-            await resolveThinking(),
-            "--append-system-prompt",
-            REPO_SCOUT_PROMPT,
-            prompt,
-          ];
-          const run = await runPi(args, {
-            cwd: ctx.cwd,
-            signal,
-            timeoutMs: repoTimeoutMs(),
-            env: { PI_SCOUT_CHECKPOINT_PATH: checkpointPath },
-            onActivity: (_item, all) => {
-              lastUpdateAt = Date.now();
-              activity = all;
-              onUpdate?.({
-                content: [
-                  {
-                    type: "text",
-                    text: `Scout child activity:\n${activityText(all)}`,
-                  },
-                ],
-                details: {
-                  model: modelName(model),
-                  state: "running",
-                  durationMs: lastUpdateAt - started,
-                  activity: all,
+        const args = [
+          "--mode",
+          "json",
+          ...(repoRuns > 1 ? ["--continue"] : []),
+          "--session-dir",
+          await repoSessionDir(),
+          "--no-extensions",
+          "-e",
+          searchToolsExtension,
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-context-files",
+          "--tools",
+          "read,rg,fd,grep,find,ls",
+          "--model",
+          modelName(model),
+          "--thinking",
+          await resolveThinking(),
+          "--append-system-prompt",
+          REPO_SCOUT_PROMPT,
+          prompt,
+        ];
+        const run = await runPi(args, {
+          cwd: ctx.cwd,
+          signal,
+          timeoutMs: repoTimeoutMs(),
+          onActivity: (_item, all) => {
+            lastUpdateAt = Date.now();
+            activity = all;
+            onUpdate?.({
+              content: [
+                {
+                  type: "text",
+                  text: `Scout child activity:\n${activityText(all)}`,
                 },
-              });
-            },
-          });
-          const checkpoint =
-            run.error === "Scout timed out."
-              ? await loadCheckpoint(checkpointPath)
-              : undefined;
-          const text = repoResult(run.text, run.error, checkpoint);
-          return {
-            content: [{ type: "text" as const, text }],
-            details: {
-              task: params.task.trim(),
-              retryReason: params.retryReason?.trim(),
-              callNumber: repoRuns,
-              model: modelName(model),
-              durationMs: run.durationMs,
-              usage: run.usage,
-              turns: run.turns,
-              activity: run.activity,
-              stopReason: run.stopReason,
-              truncated: run.truncated,
-              stderr: run.stderr,
-              checkpointRecovered: Boolean(checkpoint),
-              failureCode: run.error ? "child_error" : undefined,
-            },
-          };
-        } finally {
-          await rm(dir, { recursive: true, force: true });
-        }
+              ],
+              details: {
+                model: modelName(model),
+                state: "running",
+                durationMs: lastUpdateAt - started,
+                activity: all,
+              },
+            });
+          },
+        });
+        const text = repoResult(run.text, run.error);
+        return {
+          content: [{ type: "text" as const, text }],
+          details: {
+            task: params.task.trim(),
+            retryReason: params.retryReason?.trim(),
+            callNumber: repoRuns,
+            model: modelName(model),
+            durationMs: run.durationMs,
+            usage: run.usage,
+            turns: run.turns,
+            activity: run.activity,
+            stopReason: run.stopReason,
+            truncated: run.truncated,
+            stderr: run.stderr,
+            failureCode: run.error ? "child_error" : undefined,
+          },
+        };
       } finally {
         clearInterval(heartbeat);
         if (ctx.hasUI) ctx.ui.setStatus("pi-scout", undefined);

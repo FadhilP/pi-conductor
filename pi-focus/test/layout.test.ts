@@ -7,11 +7,17 @@ import { composeStatuses, footerRows, fitPair, plainText, shortWorkspace } from 
 test("layouts never exceed terminal width", () => {
   for (const width of [0, 1, 24, 40, 79, 80, 120]) {
     for (const density of ["compact", "comfortable"] as const) {
-      const rows = footerRows(width, density, "long-workspace", "WORKING", "in 12.3k · out 2.1k · $1.234 · ctx 72%");
+      const rows = footerRows(width, density, "long-workspace", "Named session", "WORKING", "in 12.3k · out 2.1k · $1.234 · ctx 72%");
       assert.ok(rows.every(row => visibleWidth(row) <= width));
       assert.equal(rows.length, density === "comfortable" && width >= 80 ? 2 : 1);
     }
   }
+});
+
+test("footer keeps session name visible with room", () => {
+  const row = footerRows(120, "compact", "workspace", "Named session", "READY", "usage")[0]!;
+  assert.match(row, /^Named session · workspace · READY/);
+  assert.match(row, /usage$/);
 });
 
 test("pair preserves right status under pressure", () => {

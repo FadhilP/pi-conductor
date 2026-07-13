@@ -28,9 +28,9 @@ import { registerWorkspace, type Workspace } from "../src/workspace.ts";
 import {
   candidate,
   compact,
-  isCandidatesFile,
+  normalizeCandidatesFile,
   isMemoryFile,
-  type Candidate,
+  type PendingCandidate,
   type Fact,
 } from "../src/memory.ts";
 import { assertSafe } from "../src/secrets.ts";
@@ -75,12 +75,13 @@ export default function (pi: ExtensionAPI) {
     work: Work | undefined,
     facts: Fact[] = [],
     parentFacts: Fact[] = [],
-    candidates: Candidate[] = [],
+    candidates: PendingCandidate[] = [],
     savedTools: string[] | undefined,
     lastPrompt = "",
     tasksVisible = true,
     currentCwd = "",
     latestVerification: any,
+    needsVerification = false,
     recentCalls = new Map<string, number[]>();
   const modelName = (model: any) => `${model.provider}/${model.id}`;
   const tripsCircuitBreaker = (params: unknown) => {
@@ -128,6 +129,20 @@ export default function (pi: ExtensionAPI) {
     memory: join(dir, "memory.json"),
     candidates: join(dir, "candidates.json"),
   });
+  const validCandidatesFile = (value: any) =>
+    normalizeCandidatesFile(value) !== undefined;
+  const readCandidateQueue = async () => {
+    const fallback = {
+      schemaVersion: 1 as const,
+      candidates: [] as PendingCandidate[],
+    };
+    const loaded = await readJson(
+      paths().candidates,
+      fallback,
+      validCandidatesFile,
+    );
+    return normalizeCandidatesFile(loaded)!;
+  };
   const saveWork = async () => {
     if (work) {
       assertSafe(
@@ -169,16 +184,10 @@ export default function (pi: ExtensionAPI) {
             isMemoryFile,
           )
         ).facts,
-        latestCandidates = (
-          await readJson(
-            paths().candidates,
-            { schemaVersion: 1 as const, candidates: [] as Candidate[] },
-            isCandidatesFile,
-          )
-        ).candidates;
+        latestCandidates = (await readCandidateQueue()).candidates;
       facts = latestFacts;
       candidates = latestCandidates;
-      if (!candidates.some((item) => item.status === "pending")) return;
+      if (!candidates.length) return;
       const result = compact(facts, candidates, 80);
       facts = result.facts;
       candidates = result.candidates;
@@ -225,6 +234,7 @@ export default function (pi: ExtensionAPI) {
   const disposeVerify = pi.events.on("pi-verify:result", (event: any) => {
     if (event?.version !== 1 || event.cwd !== currentCwd) return;
     latestVerification = event;
+    if (event.state === "passed") needsVerification = false;
     if (work && event.state === "failed") {
       work.latestFailure = `Verification failed (${event.results?.find((item: any) => item.code !== 0)?.command ?? "unknown check"}).`;
       work.nextAction = "Inspect bounded verification failure; use Scout then Advisor if root cause or approach remains unclear.";
@@ -291,13 +301,7 @@ export default function (pi: ExtensionAPI) {
     facts = (
       await readJson(p.memory, { schemaVersion: 1 as const, facts: [] as Fact[] }, isMemoryFile)
     ).facts;
-    candidates = (
-      await readJson(
-        p.candidates,
-        { schemaVersion: 1 as const, candidates: [] as Candidate[] },
-        isCandidatesFile,
-      )
-    ).candidates;
+    candidates = (await readCandidateQueue()).candidates;
     const parent = workspace.parentId
       ? all.find((item) => item.id === workspace!.parentId)
       : undefined;
@@ -332,13 +336,15 @@ export default function (pi: ExtensionAPI) {
     await compactMemory();
   });
   pi.on("tool_call", (event) => {
-    if (["write", "edit", "bash", "heartbeat_start"].includes(event.toolName))
-      latestVerification = undefined;
     if (blocked(work?.mode === "planning", event.toolName))
       return {
         block: true,
         reason: "Plan mode is read-only. Approve or cancel plan first.",
       };
+    if (["write", "edit", "bash", "heartbeat_start"].includes(event.toolName)) {
+      latestVerification = undefined;
+      needsVerification = true;
+    }
   });
   pi.on("input", (event) => {
     if (event.source !== "extension") lastPrompt = event.text;
@@ -373,7 +379,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "Update plan, todos, state, clarification, or durable-memory candidate.",
     promptGuidelines: [
-      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list without activating the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. During execution, use exact todo IDs from Continuity context: mark one todo in_progress before work, then mark it done immediately after verification. Before successful completion, update every todo touched this turn, write the final user-facing response in the same assistant message, then call continuity_update with completion true alone as the final tool call. Successful completion terminates the turn; do not expect or request another model call. Record concise failures/next action. Propose memory only when all three hold: evidence supports it (user instruction, verified repository/tool evidence, or repeated observation); it is likely true and useful in future sessions; it changes a future decision or avoids repeated work. Include evidence in source. Good candidates include user preferences, validated commands, project conventions, canonical paths, architecture boundaries, recurring warnings, and durable tool limitations. Never save task progress, guesses, one-time errors, temporary file state, generic facts, duplicates, or secrets. Reuse stable keys; add and replace both set one fact per key.",
+      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list without activating the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. During execution, use exact todo IDs from Continuity context: mark one todo in_progress before work, then mark it done immediately after verification when repository mutation occurred. Skip Verify for read-only work. Before successful completion, update every todo touched this turn, write the final user-facing response in the same assistant message, then call continuity_update with completion true alone as the final tool call. Successful completion terminates the turn; do not expect or request another model call. Record concise failures/next action. Propose memory only when all three hold: evidence supports it (user instruction, verified repository/tool evidence, or repeated observation); it is likely true and useful in future sessions; it changes a future decision or avoids repeated work. Include evidence in source. Good candidates include user preferences, validated commands, project conventions, canonical paths, architecture boundaries, recurring warnings, and durable tool limitations. Never save task progress, guesses, one-time errors, temporary file state, generic facts, duplicates, or secrets. Reuse stable keys; add and replace both set one fact per key.",
     ],
     renderShell: "self",
     renderCall: () => new Container(),
@@ -534,12 +540,15 @@ export default function (pi: ExtensionAPI) {
           (
             await updateJson(
               paths().candidates,
-              { schemaVersion: 1 as const, candidates: [] as Candidate[] },
+              { schemaVersion: 1 as const, candidates: [] as PendingCandidate[] },
               (file) => ({
                 schemaVersion: 1 as const,
-                candidates: [...file.candidates, next],
+                candidates: [
+                  ...normalizeCandidatesFile(file)!.candidates,
+                  next,
+                ],
               }),
-              isCandidatesFile,
+              validCandidatesFile,
             )
           ).candidates,
         );
@@ -579,7 +588,7 @@ export default function (pi: ExtensionAPI) {
                 { type: "text", text: "Cannot complete while todos remain." },
               ],
             };
-          if (latestVerification?.state !== "passed") {
+          if (needsVerification && latestVerification?.state !== "passed") {
             const explicitlyAllowed = p.allowUnverified && ["clean", "no_checks"].includes(latestVerification?.state);
             if (!explicitlyAllowed)
               return {
@@ -946,13 +955,7 @@ export default function (pi: ExtensionAPI) {
                 isMemoryFile,
               )
             ).facts,
-            latestCandidates = (
-              await readJson(
-                paths().candidates,
-                { schemaVersion: 1 as const, candidates: [] as Candidate[] },
-                isCandidatesFile,
-              )
-            ).candidates;
+            latestCandidates = (await readCandidateQueue()).candidates;
           removed = latestFacts.some((fact) => fact.key === key);
           facts = latestFacts.filter((fact) => fact.key !== key);
           candidates = latestCandidates.filter((item) => item.key !== key);
@@ -969,7 +972,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(removed ? `Forgot memory ${key}.` : `Memory ${key} not found.`, "info");
       } else
         ctx.ui.notify(
-          `${facts.length} facts, ${candidates.filter((c) => c.status === "pending").length} pending candidates.`,
+          `${facts.length} facts, ${candidates.length} pending candidates.`,
           "info",
         );
     },

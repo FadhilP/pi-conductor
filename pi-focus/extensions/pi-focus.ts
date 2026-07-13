@@ -120,6 +120,7 @@ export default function (pi: ExtensionAPI) {
             width,
             density,
             shortWorkspace(ctx.cwd),
+            pi.getSessionName() ?? "unnamed session",
             currentState,
             usage(ctx),
           ).map((line) => theme.fg("dim", line));

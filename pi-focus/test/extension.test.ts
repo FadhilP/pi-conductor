@@ -11,6 +11,41 @@ test("completion bell writes only in TUI mode", () => {
   assert.equal(output, "\x07");
 });
 
+test("focused header shows current session name", () => {
+  const handlers = new Map<string, Function[]>();
+  let sessionName: string | undefined = "Timeline naming";
+  const pi: any = {
+    getSessionName: () => sessionName,
+    getThinkingLevel: () => "low",
+    on: (name: string, handler: Function) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
+    registerCommand() {},
+  };
+  extension(pi);
+
+  let headerFactory: any;
+  const theme: any = {
+    bold: (text: string) => text,
+    fg: (_color: string, text: string) => text,
+  };
+  const ctx: any = {
+    mode: "tui",
+    cwd: "/work/pi-conductor",
+    ui: {
+      theme,
+      setHeader: (factory: any) => { headerFactory = factory; },
+      setFooter() {},
+      setEditorComponent() {},
+      setWorkingIndicator() {},
+    },
+  };
+  handlers.get("session_start")![0]({}, ctx);
+  const header = headerFactory({}, theme);
+  assert.match(header.render(120)[0], /Timeline naming/);
+
+  sessionName = "Renamed session";
+  assert.match(header.render(120)[0], /Renamed session/);
+});
+
 test("ui command toggles and reports completion bell", async () => {
   const commands = new Map<string, any>();
   const handlers = new Map<string, Function[]>();

@@ -57,6 +57,7 @@ test("completion guidance makes a successful update terminal", () => {
   const guidance = app.tools.get("continuity_update").promptGuidelines.join("\n");
   assert.match(guidance, /write the final user-facing response in the same assistant message/i);
   assert.match(guidance, /completion true alone as the final tool call/i);
+  assert.match(guidance, /skip Verify for read-only work/i);
   assert.match(guidance, /terminates the turn/i);
 });
 
@@ -145,7 +146,34 @@ test("set_plan creates executing todos without explicit plan mode", async () => 
   }
 });
 
-test("execution completion requires a qualifying Verify result", async () => {
+test("read-only execution completion skips Verify", async () => {
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const root = await mkdtemp(join(tmpdir(), "continuity-extension-read-only-"));
+  const cwd = join(root, "repo");
+  await mkdir(cwd);
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  const ctx: any = {
+    cwd, hasUI: false, mode: "json",
+    sessionManager: { getSessionId: () => "read-only-session", getEntries: () => [] },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  };
+  try {
+    const app = runtime();
+    for (const handler of app.handlers.get("session_start") ?? []) await handler({}, ctx);
+    const tool = app.tools.get("continuity_update");
+    await tool.execute("call", { action: "set_plan", goal: "Inspect", todos: ["Answer"] }, undefined, undefined, ctx);
+    await tool.execute("call", { action: "todo", todoId: "todo_1", status: "done" }, undefined, undefined, ctx);
+    app.emit("pi-verify:result", { version: 1, cwd, state: "cancelled", runId: "old-run", results: [] });
+    const completed = await tool.execute("call", { action: "state", completion: true }, undefined, undefined, ctx);
+    assert.match(completed.content[0].text, /Work completed.*No further continuity updates needed/);
+    assert.equal(completed.terminate, true);
+  } finally {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+  }
+});
+
+test("execution completion requires a qualifying Verify result after mutation", async () => {
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   const root = await mkdtemp(join(tmpdir(), "continuity-extension-verify-"));
   const cwd = join(root, "repo");
@@ -163,6 +191,8 @@ test("execution completion requires a qualifying Verify result", async () => {
     await tool.execute("call", { action: "set_plan", goal: "Ship", todos: ["Implement"] }, undefined, undefined, ctx);
     const updated = await tool.execute("call", { action: "todo", todoId: "todo_1", status: "done" }, undefined, undefined, ctx);
     assert.equal(updated.terminate, undefined);
+    for (const handler of app.handlers.get("tool_call") ?? [])
+      await handler({ toolName: "edit" }, ctx);
     const blocked = await tool.execute("call", { action: "state", completion: true }, undefined, undefined, ctx);
     assert.match(blocked.content[0].text, /Cannot complete until/);
     assert.equal(blocked.terminate, undefined);

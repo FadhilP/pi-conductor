@@ -3,15 +3,15 @@ import { redact } from "./redact.ts";
 
 export type Snapshot = { text: string; estimatedTokens: number; redactionCount: number; truncated: boolean };
 const CHARS_PER_TOKEN = 4;
-const MAX_INPUT_TOKENS = 32_000;
-const REQUEST_TOKENS = 512;
-const USER_TOKENS = 8_000;
+const MAX_INPUT_TOKENS = 32_768;
+const REQUEST_TOKENS = 2_048;
+const USER_TOKENS = 4_096;
 const EVIDENCE_TOKENS = 8_192;
-const CONTINUITY_TOKENS = 4_000;
-const VERIFICATION_TOKENS = 1_000;
-const SUMMARY_TOKENS = 8_000;
-const ASSISTANT_TOKENS = 4_000;
-const SYSTEM_TOKENS = 4_000;
+const CONTINUITY_TOKENS = 4_096;
+const VERIFICATION_TOKENS = 1_024;
+const SUMMARY_TOKENS = 8_192;
+const ASSISTANT_TOKENS = 4_096;
+const SYSTEM_TOKENS = 4_096;
 
 function contentText(content: any): string {
   if (typeof content === "string") return content;

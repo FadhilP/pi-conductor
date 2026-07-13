@@ -24,10 +24,11 @@ export function footerRows(
   width: number,
   density: Density,
   workspace: string,
+  session: string,
   state: string,
   usage: string,
 ): string[] {
-  const primary = fitPair(`${workspace} · ${state}`, usage, width);
+  const primary = fitPair(`${session} · ${workspace} · ${state}`, usage, width);
   return density === "comfortable" && width >= 80
     ? [primary, fitPair("", "Ctrl+O tools · Ctrl+P model", width)]
     : [primary];

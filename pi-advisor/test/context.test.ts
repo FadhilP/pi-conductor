@@ -55,7 +55,15 @@ test("snapshot excludes raw tool and bash output", () => {
   assert.doesNotMatch(snapshot.text, /noisy tool output|noisy bash output/);
 });
 
-test("latest user request has an 8k-token head-tail cap", () => {
+test("advisor request has a 2k-token head-tail cap", () => {
+  const snapshot = buildSnapshot("system", [{ role: "custom", customType: "advisor-request", content: `START-${"alpha ".repeat(2_000)}-MIDDLE-${"omega ".repeat(2_000)}-END` }], 100_000);
+  assert.match(snapshot.text, /START-/);
+  assert.match(snapshot.text, /-END/);
+  assert.doesNotMatch(snapshot.text, /-MIDDLE-/);
+  assert.match(snapshot.text, /advisor-request truncated: middle omitted/);
+});
+
+test("latest user request has a 4k-token head-tail cap", () => {
   const snapshot = buildSnapshot("system", [{ role: "user", content: `START-${"alpha ".repeat(7_000)}-MIDDLE-${"omega ".repeat(7_000)}-END` }], 100_000);
   assert.match(snapshot.text, /START-/);
   assert.match(snapshot.text, /-END/);
@@ -102,7 +110,7 @@ test("small model windows reserve bounded input and output", () => {
   assert.equal(advisorMaxTokens(100_000), ADVISOR_MAX_OUTPUT_TOKENS);
 });
 
-test("large model windows cap total estimated input at 32k tokens", () => {
+test("large model windows cap total estimated input at 32,768 tokens", () => {
   const reservedInputTokens = 1000;
   const snapshot = buildSnapshot(
     "s".repeat(20_000),
@@ -116,7 +124,7 @@ test("large model windows cap total estimated input at 32k tokens", () => {
     200_000,
     reservedInputTokens,
   );
-  assert.ok(snapshot.estimatedTokens + reservedInputTokens <= 32_000);
+  assert.ok(snapshot.estimatedTokens + reservedInputTokens <= 32_768);
   assert.equal(snapshot.truncated, true);
 });
 

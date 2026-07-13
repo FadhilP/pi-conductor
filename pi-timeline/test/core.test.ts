@@ -5,12 +5,105 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import extension from "../extensions/pi-timeline.ts";
 import { capture } from "../src/snapshot.ts";
 import { restore } from "../src/restore.ts";
 import { preflight } from "../src/safety.ts";
 import { findRunEntry, isRunEntry } from "../src/run.ts";
 
 const exec = promisify(execFile);
+
+function namingHarness(entries: any[]) {
+  const handlers = new Map<string, Function[]>(), names: string[] = [];
+  const pi: any = {
+    events: { on: () => () => {} },
+    on: (name: string, handler: Function) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
+    registerCommand() {},
+    setSessionName: (name: string) => names.push(name),
+  };
+  extension(pi);
+  const ctx: any = {
+    cwd: join(tmpdir(), "pi-timeline-naming-test"),
+    hasUI: false,
+    sessionManager: {
+      getBranch: () => entries,
+      getEntries: () => entries,
+      getLeafId: () => entries.at(-1)?.id,
+      getSessionFile: () => undefined,
+      getSessionId: () => "naming-test",
+    },
+  };
+  return { handlers, names, ctx };
+}
+
+test("unnamed sessions are named from first prompt after settled turn", async () => {
+  const entries = [{
+    type: "message",
+    id: "user-1",
+    message: { role: "user", content: "  Add session naming\nwithout noise  " },
+  }];
+  const { handlers, names, ctx } = namingHarness(entries);
+  await handlers.get("session_start")![0]({}, ctx);
+  await handlers.get("agent_settled")![0]({}, ctx);
+  assert.deepEqual(names, ["Add session naming without noise"]);
+});
+
+test("main model supplies semantic title without exposing marker", async () => {
+  const entries = [{
+    type: "message",
+    id: "user-1",
+    message: { role: "user", content: "Can we add session name to the TUI?" },
+  }];
+  const { handlers, names, ctx } = namingHarness(entries);
+  await handlers.get("session_start")![0]({}, ctx);
+  const prompt = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
+  assert.match(prompt.systemPrompt, /3-8 word semantic task title/);
+
+  const result = await handlers.get("message_end")![0]({
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Done.\n<!-- pi-session-title: Persistent TUI Session Names -->" }],
+    },
+  }, ctx);
+  assert.deepEqual(names, ["Persistent TUI Session Names"]);
+  assert.deepEqual(result.message.content, [{ type: "text", text: "Done." }]);
+
+  await handlers.get("agent_settled")![0]({}, ctx);
+  assert.deepEqual(names, ["Persistent TUI Session Names"]);
+});
+
+test("manual rename wins while semantic title is pending", async () => {
+  const entries = [{
+    type: "message",
+    id: "user-1",
+    message: { role: "user", content: "First prompt" },
+  }];
+  const { handlers, names, ctx } = namingHarness(entries);
+  await handlers.get("session_start")![0]({}, ctx);
+  await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
+  await handlers.get("session_info_changed")![0]({ name: "Manual title" }, ctx);
+  const result = await handlers.get("message_end")![0]({
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Done.\n<!-- pi-session-title: Generated Title -->" }],
+    },
+  }, ctx);
+  assert.deepEqual(names, []);
+  assert.deepEqual(result.message.content, [{ type: "text", text: "Done." }]);
+});
+
+test("existing or manually cleared session names remain untouched", async () => {
+  for (const name of ["Existing name", ""]) {
+    const entries = [
+      { type: "message", id: "user-1", message: { role: "user", content: "First prompt" } },
+      { type: "session_info", id: "name-1", name },
+    ];
+    const { handlers, names, ctx } = namingHarness(entries);
+    await handlers.get("session_start")![0]({}, ctx);
+    await handlers.get("agent_settled")![0]({}, ctx);
+    assert.deepEqual(names, []);
+  }
+});
 
 test("run metadata is optional and latest valid entry wins", () => {
   assert.equal(findRunEntry([]), undefined);

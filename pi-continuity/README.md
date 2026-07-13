@@ -29,13 +29,13 @@ Planner and executor profiles are optional. Resetting either profile uses the ma
 
 The task widget shows all stored todos while the agent works and clears when the turn settles; todo descriptions are capped at 120 characters. `/todos` remains available afterward. Direct execution task lists do not restrict tools. Explicit plan mode permits only `read`, `grep` or `rg`, `find` or `fd`, `ls`, `continuity_update`, `repo_scout`, and `advisor`. Approval restores only tools Continuity removed. Replanning preserves matching todo progress; completion requires every todo done.
 
-Execution completion requires current-worktree Verify state `passed`. `clean` or `no_checks` requires explicit `allowUnverified`. Failed, cancelled, stale, error, and missing results never qualify. Mutation tool calls invalidate prior verification. Heartbeat jobs carrying a valid `todoId` update that todo from running through completion or failure. `/plan review` records a shared-run `reviewer` phase and starts bounded implementation review.
+Read-only work can complete without Verify. After a mutation-capable tool call, execution completion requires current-worktree Verify state `passed`; `clean` or `no_checks` requires explicit `allowUnverified`. Failed, cancelled, stale, error, and missing results never qualify. Mutation debt persists across user turns until verification passes. Heartbeat jobs carrying a valid `todoId` update that todo from running through completion or failure. `/plan review` records a shared-run `reviewer` phase and starts bounded implementation review.
 
 ## Memory and Storage
 
 State lives under `${PI_CODING_AGENT_DIR:-~/.pi/agent}/pi-continuity`, never in the project. Memory candidates can be stored with or without active plan work and compact automatically when each agent turn settles. `/memory compact` triggers immediate compaction without a model call.
 
-Compaction keeps one fact per stable key, treats `add` and `replace` as set operations, applies `remove`, clears processed candidates, and retains up to 80 facts with preferences and warnings favored. Preferences always enter context; other facts enter only when lexically relevant. Compacted facts survive reload and can surface from the nearest parent workspace.
+Candidates form a pending-only queue; legacy pending records are normalized while legacy applied or rejected history is ignored. Compaction keeps one fact per stable key, treats `add` and `replace` as set operations, applies `remove`, clears processed candidates, and retains up to 80 facts with preferences and warnings favored. Preferences always enter context; other facts enter only when lexically relevant. Compacted facts survive reload and can surface from the nearest parent workspace.
 
 Persisted work and memory are schema-validated; malformed files are quarantined. Writes use unique temporary files and short cross-process locks. Pi owns sessions and compaction. Explicit plan and executor sessions carry versioned `pi-conductor-run` custom entries with one shared `runId`, allowing consumers such as pi-timeline to group them without detecting whether Continuity is installed.
 

@@ -31,7 +31,7 @@ Calls are unlimited within one original user prompt. Later calls reuse the first
 
 Scout returns exact `path:start-end` citations and narrow excerpts. The main model treats those ranges as its working set, reads cited ranges when verification is needed, and expands only for a stated gap or changed context. Known-file micro-edits should skip Scout.
 
-The isolated child has read-only `read`, `rg`, `fd`, `grep`, `find`, and `ls`. It has no shell, mutation tools, other extensions, skills, or context files. Activity history retains at most 100 events. Periodic cited checkpoints allow a timeout to return partial, non-repeated findings.
+The isolated child has read-only `read`, `rg`, `fd`, `grep`, `find`, and `ls`. It has no shell, mutation tools, other extensions, skills, or context files. It batches clearly independent searches or narrow reads while keeping dependent investigation sequential. Activity history retains at most 100 events. Timeouts fail nonfatally; retry with a focused follow-up task.
 
 ## Session Search
 

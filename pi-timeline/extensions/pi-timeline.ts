@@ -5,7 +5,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { capture, type Snapshot } from "../src/snapshot.ts";
 import { restore } from "../src/restore.ts";
-import { promptText, promptTitle } from "../src/prompts.ts";
+import {
+  extractSessionTitle,
+  promptText,
+  promptTitle,
+} from "../src/prompts.ts";
 import { git } from "../src/git.ts";
 import {
   findRunEntry,
@@ -45,6 +49,7 @@ export default function (pi: ExtensionAPI) {
   let records = new Map<string, Bound>(),
     paired = false,
     namingDecided = false,
+    titleRequested = false,
     pendingContext = "",
     activeRun: RunEntry | undefined,
     latestVerification: any,
@@ -212,6 +217,7 @@ export default function (pi: ExtensionAPI) {
     latestVerification = undefined;
     await load(ctx);
     paired = false;
+    titleRequested = false;
     namingDecided = ctx.sessionManager
       .getEntries()
       .some((entry: any) => entry.type === "session_info");
@@ -223,6 +229,23 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("session_info_changed", () => {
     namingDecided = true;
+  });
+  pi.on("before_agent_start", (event) => {
+    if (namingDecided || titleRequested) return;
+    titleRequested = true;
+    return {
+      systemPrompt: `${event.systemPrompt}\n\nSession naming: End your final assistant message for this agent run with exactly <!-- pi-session-title: TITLE -->. Replace TITLE with a 3-8 word semantic task title, not a copy of the user prompt, maximum 60 characters. Do not mention this marker; it is removed before display.`,
+    };
+  });
+  pi.on("message_end", (event) => {
+    if (event.message.role !== "assistant") return;
+    const extracted = extractSessionTitle(event.message);
+    if (!extracted.title) return;
+    if (!namingDecided) {
+      namingDecided = true;
+      pi.setSessionName(extracted.title);
+    }
+    return { message: extracted.message };
   });
   pi.on("input", (event) => {
     if (event.source !== "extension") paired = false;

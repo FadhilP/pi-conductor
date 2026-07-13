@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import {
   compact,
   candidate,
-  isCandidatesFile,
+  normalizeCandidatesFile,
   isMemoryFile,
-  type Candidate,
+  type PendingCandidate,
   type Fact,
 } from "../src/memory.ts";
 import { readJson, updateJson, writeJson } from "../src/storage.ts";
@@ -92,6 +92,33 @@ test("memory deterministic", () => {
   assert.equal(result.facts.length, 1);
   assert.deepEqual(result.candidates, []);
 });
+test("candidate queue normalizes legacy pending entries and drops decided history", () => {
+  const pending = candidate({
+    key: "workflow.test",
+    kind: "workflow",
+    text: "npm test",
+    source: "README",
+    confidence: 1,
+    action: "add",
+  });
+  assert.equal("status" in pending, false);
+  const normalized = normalizeCandidatesFile({
+    schemaVersion: 1,
+    candidates: [
+      { ...pending, status: "pending", decidedAt: "2026-01-01" },
+      { ...pending, id: "applied", status: "applied" },
+      { ...pending, id: "rejected", status: "rejected" },
+    ],
+  });
+  assert.deepEqual(normalized?.candidates, [pending]);
+  assert.equal(
+    normalizeCandidatesFile({
+      schemaVersion: 1,
+      candidates: [{ ...pending, status: "unknown" }],
+    }),
+    undefined,
+  );
+});
 test("memory is keyed and retention favors preferences and warnings", () => {
   const first = candidate({
       key: "workflow.test", kind: "workflow", text: "npm test", source: "README",
@@ -133,11 +160,12 @@ test("memory persists, compacts, reloads, and reaches child context", async () =
   });
   const candidatePath = join(parent.dir, "candidates.json");
   await writeJson(candidatePath, { schemaVersion: 1, candidates: [pending] });
-  const loadedCandidates = await readJson(
+  const loadedCandidateFile = await readJson(
     candidatePath,
-    { schemaVersion: 1 as const, candidates: [] as Candidate[] },
-    isCandidatesFile,
+    { schemaVersion: 1 as const, candidates: [] as PendingCandidate[] },
+    (value) => normalizeCandidatesFile(value) !== undefined,
   );
+  const loadedCandidates = normalizeCandidatesFile(loadedCandidateFile)!;
   const compacted = compact([], loadedCandidates.candidates);
   await writeJson(candidatePath, { schemaVersion: 1, candidates: compacted.candidates });
   const memoryPath = join(parent.dir, "memory.json");
@@ -151,12 +179,12 @@ test("memory persists, compacts, reloads, and reaches child context", async () =
     buildContext(undefined, [], "npm test", 900, loadedMemory.facts),
     /Parent memory workflow\.test: Run npm test/,
   );
-  const decidedCandidates = await readJson(
+  const decidedCandidateFile = await readJson(
     candidatePath,
-    { schemaVersion: 1 as const, candidates: [] as Candidate[] },
-    isCandidatesFile,
+    { schemaVersion: 1 as const, candidates: [] as PendingCandidate[] },
+    (value) => normalizeCandidatesFile(value) !== undefined,
   );
-  assert.deepEqual(decidedCandidates.candidates, []);
+  assert.deepEqual(normalizeCandidatesFile(decidedCandidateFile)?.candidates, []);
   await writeJson(memoryPath, { schemaVersion: 1, facts: [{ bad: true }] });
   const rejectedMemory = await readJson(
     memoryPath,

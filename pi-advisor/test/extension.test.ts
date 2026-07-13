@@ -28,4 +28,5 @@ test("advisor call renders the executor request instead of the user prompt", () 
   assert.match(rendered, /Review migration path risks\./);
   assert.doesNotMatch(rendered, /original user prompt/);
   assert.ok(tool.parameters.required.includes("request"));
+  assert.equal(tool.parameters.properties.request.maxLength, 8_192);
 });
