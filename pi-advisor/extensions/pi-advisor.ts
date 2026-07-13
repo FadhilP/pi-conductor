@@ -370,7 +370,7 @@ export default function (pi: ExtensionAPI) {
         Math.min(calls + 1, ADVISOR_MAX_CALLS);
       context.state.callNumber = callNumber;
       const prompt = originalPrompt.replace(/\s+/g, " ");
-      const truncatedPrompt = prompt.length > 256 ? `${prompt.slice(0, 253)}...` : prompt;
+      const truncatedPrompt = prompt.length > 512 ? `${prompt.slice(0, 509)}...` : prompt;
       return new Text(
         theme.fg("toolTitle", theme.bold("Advisor")) +
           theme.fg("muted", ` · ${callNumber}/${ADVISOR_MAX_CALLS}`) +
@@ -389,7 +389,7 @@ export default function (pi: ExtensionAPI) {
         details.failureCode ? "warning" : "success",
         `Advisor · ${details.advisorModel ?? "Unavailable"}`,
       );
-      if (!details.failureCode)
+      if (!details.failureCode && details.usage)
         text += theme.fg(
           "dim",
           ` · ${details.usage.input} input · ${details.usage.output} output · R${details.usage.cacheRead} · W${details.usage.cacheWrite} · $${details.usage.cost.toFixed(4)} · ${(details.durationMs / 1000).toFixed(1)}s`,

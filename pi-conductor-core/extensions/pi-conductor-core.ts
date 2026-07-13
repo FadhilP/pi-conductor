@@ -1,4 +1,7 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { constants } from "node:fs";
+import { access, readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   parseToolMessage,
   reconcileTools,
@@ -109,9 +112,54 @@ export default function (pi: ExtensionAPI) {
     managedByOwner.clear();
   });
 
+  const doctor = async () => {
+    const knownTools = new Set([...baseline, ...managedTools(), ...pi.getActiveTools()]);
+    const surfaces = [
+      ["Advisor", ["advisor"]],
+      ["Continuity", ["continuity_update"]],
+      ["Heartbeat", ["heartbeat_start", "heartbeat_status", "heartbeat_cancel"]],
+      ["Scout", ["rg", "fd", "scout_checkpoint", "repo_scout"]],
+      ["Verify", ["verify"]],
+    ] as const;
+    const surfaceLines = surfaces.map(([name, tools]) => {
+      const found = tools.filter((tool) => knownTools.has(tool));
+      return `${name}: ${found.length === tools.length ? "registered" : found.length ? `partial (${found.join(", ")})` : "not observed"}`;
+    });
+    const apiNames = ["getActiveTools", "setActiveTools", "on", "registerCommand"] as const;
+    const missingApi = apiNames.filter((name) => typeof pi[name] !== "function");
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    const nodeCompatible = major > 22 || (major === 22 && minor >= 18);
+    const agentDir = getAgentDir();
+    let stateStatus = "missing (created on first persisted setting)";
+    let oldLocks: string[] = [];
+    try {
+      await access(agentDir, constants.W_OK);
+      stateStatus = "writable";
+      const continuityDir = join(agentDir, "pi-continuity");
+      const entries = await readdir(continuityDir).catch(() => []);
+      const now = Date.now();
+      oldLocks = (await Promise.all(entries.filter((name) => name.endsWith(".lock")).map(async (name) => {
+        const info = await stat(join(continuityDir, name)).catch(() => undefined);
+        return info && now - info.mtimeMs > 30_000 ? name : undefined;
+      }))).filter((name): name is string => Boolean(name));
+    } catch {}
+    return {
+      lines: [
+        `Node: ${process.versions.node} (${nodeCompatible ? "compatible" : "requires >=22.18.0"})`,
+        `Pi API: ${missingApi.length ? `missing ${missingApi.join(", ")}` : "compatible"}`,
+        `State root: ${agentDir} (${stateStatus})`,
+        `Locks older than 30s: ${oldLocks.join(", ") || "none"}`,
+        "Tool surfaces:",
+        ...surfaceLines,
+        "Command-only surfaces (Focus, Guard, Timeline): not observable through ExtensionAPI",
+      ],
+      warning: !nodeCompatible || missingApi.length > 0,
+    };
+  };
+
   pi.registerCommand("conductor", {
-    description: "Show coordinated Pi package tool policies and diagnostics",
-    handler: async (_args, ctx) => {
+    description: "Show coordinated policies; use /conductor doctor for environment diagnostics",
+    handler: async (args, ctx) => {
       const policyLines = [...policies.values()]
         .sort((a, b) => a.owner.localeCompare(b.owner))
         .map(
@@ -121,7 +169,9 @@ export default function (pi: ExtensionAPI) {
       const missing = ["pi-advisor", "pi-scout", "pi-continuity"].filter(
         (owner) => !policies.has(owner),
       );
+      const diagnosis = args.trim().toLowerCase() === "doctor" ? await doctor() : undefined;
       const lines = [
+        ...(diagnosis ? ["Conductor doctor", ...diagnosis.lines, ""] : []),
         `Baseline: ${[...baseline].join(", ") || "none"}`,
         `Effective: ${pi.getActiveTools().join(", ") || "none"}`,
         ...(policyLines.length ? policyLines : ["Policies: none"]),
@@ -133,7 +183,7 @@ export default function (pi: ExtensionAPI) {
       ];
       ctx.ui.notify(
         lines.join("\n"),
-        lastError || lastAcknowledgeError || rejected.length ? "warning" : "info",
+        lastError || lastAcknowledgeError || rejected.length || diagnosis?.warning ? "warning" : "info",
       );
     },
   });

@@ -69,6 +69,12 @@ test("extension validates, unregisters, diagnoses, and cleans listener", async (
   assert.match(diagnostic, /Effective:/);
   assert.match(diagnostic, /Rejected: 1/);
   assert.match(diagnostic, /Guard authority: blocked: destructive Git command/);
+  await runtime.commands.get("conductor").handler("doctor", { ui: { notify: (text: string) => { diagnostic = text; } } });
+  assert.match(diagnostic, /Conductor doctor/);
+  assert.match(diagnostic, /Node: .*compatible/);
+  assert.match(diagnostic, /Pi API: compatible/);
+  assert.match(diagnostic, /Tool surfaces:/);
+  assert.match(diagnostic, /Advisor: registered/);
   for (const handler of runtime.handlers.get("session_shutdown") ?? []) handler();
   assert.equal(runtime.events.count("pi-conductor:tool-policy"), 0);
   assert.equal(runtime.events.count("pi-guard:decision"), 0);

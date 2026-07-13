@@ -369,7 +369,7 @@ export default function (pi: ExtensionAPI) {
       const callNumber = (context.state.callNumber as number | undefined) ?? repoRuns + 1;
       context.state.callNumber = callNumber;
       const prompt = args.task.trim().replace(/\s+/g, " ");
-      const truncatedPrompt = prompt.length > 256 ? `${prompt.slice(0, 253)}...` : prompt;
+      const truncatedPrompt = prompt.length > 512 ? `${prompt.slice(0, 509)}...` : prompt;
       return new Text(
         theme.fg("toolTitle", theme.bold("Scout")) +
           theme.fg("muted", ` · ${callNumber}/∞`) +

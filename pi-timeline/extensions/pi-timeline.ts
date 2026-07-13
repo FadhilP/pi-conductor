@@ -134,7 +134,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus(
         "pi-timeline",
         records.size
-          ? `checkpoints: ${records.size} · session: ${paired ? "paired" : "unpaired"}`
+          ? `Checkpoints: ${records.size} · Session: ${paired ? "Paired" : "Unpaired"}`
           : undefined,
       );
   };

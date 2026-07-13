@@ -200,6 +200,56 @@ test("explicit plan selects planner and hands approved work to executor session"
   }
 });
 
+test("task widget resets after settlement but survives mid-turn steering", async () => {
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const root = await mkdtemp(join(tmpdir(), "continuity-extension-widget-reset-"));
+  const cwd = join(root, "repo");
+  await mkdir(cwd);
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  const widgets: unknown[] = [];
+  const ctx: any = {
+    cwd,
+    hasUI: true,
+    mode: "tui",
+    sessionManager: { getSessionId: () => "widget-reset-session", getEntries: () => [] },
+    ui: {
+      notify: () => {},
+      setStatus: () => {},
+      setWidget: (_name: string, value: unknown) => widgets.push(value),
+    },
+  };
+  try {
+    const app = runtime();
+    for (const handler of app.handlers.get("session_start") ?? []) await handler({}, ctx);
+    const tool = app.tools.get("continuity_update");
+    await tool.execute("call", {
+      action: "set_plan",
+      goal: "First task",
+      todos: ["Implement"],
+    }, undefined, undefined, ctx);
+    const shown = widgets.length;
+    assert.deepEqual(widgets.at(-1), ["Tasks", "○ Implement"]);
+
+    for (const handler of app.handlers.get("input") ?? [])
+      await handler({ text: "Adjust it", source: "interactive", streamingBehavior: "steer" }, ctx);
+    assert.equal(widgets.length, shown);
+
+    for (const handler of app.handlers.get("agent_settled") ?? []) await handler({}, ctx);
+    for (const handler of app.handlers.get("agent_start") ?? []) await handler({}, ctx);
+    assert.equal(widgets.at(-1), undefined);
+
+    await tool.execute("call", {
+      action: "set_plan",
+      goal: "Second task",
+      todos: ["Verify"],
+    }, undefined, undefined, ctx);
+    assert.deepEqual(widgets.at(-1), ["Tasks", "○ Verify"]);
+  } finally {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+  }
+});
+
 test("settled TUI plan offers decision and dispatches selected command once", async () => {
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   const root = await mkdtemp(join(tmpdir(), "continuity-extension-selector-"));

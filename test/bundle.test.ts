@@ -1,0 +1,109 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import advisor from "../pi-advisor/extensions/pi-advisor.ts";
+import conductor from "../pi-conductor-core/extensions/pi-conductor-core.ts";
+import continuity from "../pi-continuity/extensions/pi-continuity.ts";
+import focus from "../pi-focus/extensions/pi-focus.ts";
+import guard from "../pi-guard/extensions/pi-guard.ts";
+import heartbeat from "../pi-heartbeat/extensions/pi-heartbeat.ts";
+import searchTools from "../pi-scout/extensions/search-tools.ts";
+import scout from "../pi-scout/extensions/pi-scout.ts";
+import scoutCheckpoint from "../pi-scout/extensions/scout-checkpoint.ts";
+import timeline from "../pi-timeline/extensions/pi-timeline.ts";
+import verify from "../pi-verify/extensions/pi-verify.ts";
+
+class Bus {
+  handlers = new Map<string, Set<(value: unknown) => void>>();
+  on(channel: string, handler: (value: unknown) => void) {
+    const handlers = this.handlers.get(channel) ?? new Set();
+    handlers.add(handler);
+    this.handlers.set(channel, handlers);
+    return () => handlers.delete(handler);
+  }
+  emit(channel: string, value: unknown) {
+    for (const handler of this.handlers.get(channel) ?? []) handler(value);
+  }
+  count() {
+    return [...this.handlers.values()].reduce((sum, handlers) => sum + handlers.size, 0);
+  }
+}
+
+test("root bundle loads, starts, wires integrations, and shuts down", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.deepEqual(manifest.pi.extensions, [
+    "./pi-advisor/extensions/pi-advisor.ts",
+    "./pi-conductor-core/extensions/pi-conductor-core.ts",
+    "./pi-continuity/extensions/pi-continuity.ts",
+    "./pi-focus/extensions/pi-focus.ts",
+    "./pi-guard/extensions/pi-guard.ts",
+    "./pi-heartbeat/extensions/pi-heartbeat.ts",
+    "./pi-scout/extensions/search-tools.ts",
+    "./pi-scout/extensions/pi-scout.ts",
+    "./pi-scout/extensions/scout-checkpoint.ts",
+    "./pi-timeline/extensions/pi-timeline.ts",
+    "./pi-verify/extensions/pi-verify.ts",
+  ]);
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const root = await mkdtemp(join(tmpdir(), "pi-conductor-bundle-"));
+  const cwd = join(root, "repo");
+  await mkdir(cwd);
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  try {
+    const events = new Bus();
+    const handlers = new Map<string, Function[]>();
+    const commands = new Map<string, any>();
+    const tools = new Map<string, any>();
+    const renderers = new Map<string, any>();
+    let active: string[] = ["read", "edit", "write", "bash"];
+    const pi: any = {
+      events,
+      on: (name: string, handler: Function) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
+      registerTool: (tool: any) => { tools.set(tool.name, tool); active.push(tool.name); },
+      registerCommand: (name: string, command: any) => commands.set(name, command),
+      registerEntryRenderer: (name: string, renderer: any) => renderers.set(name, renderer),
+      getActiveTools: () => [...new Set(active)],
+      setActiveTools: (tools: string[]) => { active = [...tools]; },
+      getThinkingLevel: () => "low",
+      setThinkingLevel: () => {},
+      getSessionName: () => undefined,
+      setSessionName: () => {},
+      setModel: async () => true,
+      appendEntry: () => {},
+      sendUserMessage: () => {},
+      exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+    };
+    [advisor, conductor, continuity, focus, guard, heartbeat, searchTools, scout, scoutCheckpoint, timeline, verify]
+      .forEach((extension) => extension(pi));
+
+    assert.deepEqual([...commands.keys()].sort(), [
+      "advisor", "conductor", "continuity", "guard", "heartbeat", "memory", "plan", "scout", "timeline", "todos", "ui",
+    ]);
+    assert.deepEqual([...tools.keys()].sort(), [
+      "advisor", "continuity_update", "fd", "heartbeat_cancel", "heartbeat_start", "heartbeat_status", "repo_scout", "rg", "scout_checkpoint", "verify",
+    ]);
+    assert.ok(renderers.has("pi-scout-session"));
+
+    const ui = new Proxy({ confirm: async () => false }, { get: (target, property) => (target as any)[property] ?? (() => {}) });
+    const ctx: any = {
+      cwd, hasUI: false, mode: "json", model: undefined, ui,
+      modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false, getAvailable: () => [] },
+      sessionManager: {
+        getEntries: () => [], getBranch: () => [], getSessionId: () => "bundle-session",
+        getSessionFile: () => join(root, "session.jsonl"), getLeafId: () => undefined,
+      },
+    };
+    for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
+    assert.ok(active.includes("continuity_update"));
+    assert.ok(active.includes("repo_scout"));
+    assert.ok(events.count() > 0);
+
+    for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
+    assert.equal(events.count(), 0);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  }
+});

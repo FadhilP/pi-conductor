@@ -80,6 +80,7 @@ export default function (pi: ExtensionAPI) {
     lastPrompt = "",
     lastOfferedPlan = "",
     selectionOpen = false,
+    tasksVisible = true,
     currentCwd = "",
     latestVerification: any;
   const modelName = (model: any) => `${model.provider}/${model.id}`;
@@ -290,6 +291,7 @@ export default function (pi: ExtensionAPI) {
         ).facts
       : [];
     gate(work?.mode === "planning");
+    tasksVisible = true;
     refresh(ctx);
   });
   pi.on("session_shutdown", () => {
@@ -301,8 +303,11 @@ export default function (pi: ExtensionAPI) {
       owner: "pi-continuity",
     });
   });
-  pi.on("agent_start", (_e, ctx) => refresh(ctx));
+  pi.on("agent_start", (_e, ctx) =>
+    tasksVisible ? refresh(ctx) : hideTasks(ctx),
+  );
   pi.on("agent_settled", async (_e, ctx) => {
+    tasksVisible = false;
     hideTasks(ctx);
     await compactMemory();
     if (
@@ -487,6 +492,7 @@ export default function (pi: ExtensionAPI) {
         setPlan(work, p.todos || [], now);
         work.updatedAt = now;
         await saveWork();
+        tasksVisible = true;
         refresh(ctx);
         return {
           content: [
@@ -634,6 +640,7 @@ export default function (pi: ExtensionAPI) {
             createdAt: new Date().toISOString(),
           } satisfies RunEntry);
         gate(false);
+        tasksVisible = true;
         refresh(ctx);
         pi.sendUserMessage(
           "Execute approved stored plan in current session. Track and verify todos.",
