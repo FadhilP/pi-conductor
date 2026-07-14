@@ -166,6 +166,8 @@ export default function (pi: ExtensionAPI) {
             details: { id: j.id, state: j.state, retryAfterMs: wait },
           };
         j.lastCheckedAt = Date.now();
+        if (!["running", "cancelling"].includes(j.state))
+          j.completionAnnounced = true;
         return {
           content: [{ type: "text", text: manager.format(j).text }],
           details: {
@@ -177,8 +179,22 @@ export default function (pi: ExtensionAPI) {
           },
         };
       }
+      const running = manager.running();
+      const wait = Math.max(0, ...running.map((j) => checkWaitMs(j)));
+      if (wait)
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Check too soon. Continue other work; retry in ${Math.ceil(wait / 1000)}s.`,
+            },
+          ],
+          details: { state: "running", retryAfterMs: wait },
+        };
+      const checkedAt = Date.now();
+      for (const j of running) j.lastCheckedAt = checkedAt;
       const jobs = [
-        ...manager.running().slice(0, 4),
+        ...running.slice(0, 4),
         ...[...manager.jobs.values()]
           .filter((j) => !["running", "cancelling"].includes(j.state))
           .sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0))
@@ -239,7 +255,11 @@ export default function (pi: ExtensionAPI) {
           : wait
             ? `Check too soon. Retry in ${Math.ceil(wait / 1000)}s.`
             : manager.format(j).text;
-        if (j && !wait) j.lastCheckedAt = Date.now();
+        if (j && !wait) {
+          j.lastCheckedAt = Date.now();
+          if (!["running", "cancelling"].includes(j.state))
+            j.completionAnnounced = true;
+        }
       } else
         text =
           [...manager.jobs.values()]

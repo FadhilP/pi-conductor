@@ -35,6 +35,11 @@ test("running status checks stay over 30 seconds apart", async () => {
   assert.equal(checkWaitMs(job, job.startedAt), MIN_CHECK_INTERVAL_MS + 1);
   assert.equal(checkWaitMs(job, job.startedAt + MIN_CHECK_INTERVAL_MS), 1);
   assert.equal(checkWaitMs(job, job.startedAt + MIN_CHECK_INTERVAL_MS + 1), 0);
+  assert.match(jobContext([job], job.startedAt), /Do not call heartbeat_status yet/);
+  assert.match(
+    jobContext([job], job.startedAt + MIN_CHECK_INTERVAL_MS + 1),
+    /status available now/,
+  );
   await manager.stop(job);
   await closed(job);
   await manager.shutdown();
@@ -55,6 +60,9 @@ test("start returns, captures UTF-8 output, and completes", async () => {
   assert.match(job.stdoutTail.toString(), /ok 世界/);
   assert.match(await readFile(job.logPath, "utf8"), /ok 世界/);
   assert.match(jobContext([job]), new RegExp(job.id));
+  assert.equal(job.completionAnnounced, false);
+  assert.match(jobContext([job]), /status available now/);
+  assert.equal(job.completionAnnounced, false);
   await manager.shutdown();
 });
 

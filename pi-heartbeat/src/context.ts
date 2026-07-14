@@ -1,5 +1,6 @@
 import type { Job } from "./jobs.ts";
-export function jobContext(jobs: Job[]) {
+import { checkWaitMs } from "./polling.ts";
+export function jobContext(jobs: Job[], now = Date.now()) {
   const selected = jobs
     .filter(
       (j) =>
@@ -9,11 +10,13 @@ export function jobContext(jobs: Job[]) {
     )
     .slice(0, 4);
   if (!selected.length) return "";
-  for (const j of selected)
-    if (!["running", "cancelling"].includes(j.state))
-      j.completionAnnounced = true;
-  return `Background jobs:\n${selected.map((j) => `- ${j.id} ${j.label}: ${j.state}${j.exitCode !== undefined ? `, exit ${j.exitCode}` : ""}`).join("\n")}\nCall heartbeat_status for output.`.slice(
-    0,
-    1200,
-  );
+  const available = selected.filter((j) => checkWaitMs(j, now) === 0);
+  const lines = selected.map((j) => {
+    const wait = checkWaitMs(j, now);
+    return `- ${j.id} ${j.label}: ${j.state}${j.exitCode !== undefined ? `, exit ${j.exitCode}` : ""} (${wait ? `do not check for ${Math.ceil(wait / 1000)}s` : "status available now"})`;
+  });
+  const instruction = available.length
+    ? "Call heartbeat_status only with a job ID marked status available now."
+    : "Do not call heartbeat_status yet; continue other work.";
+  return `Background jobs:\n${lines.join("\n")}\n${instruction}`.slice(0, 1200);
 }
