@@ -73,6 +73,7 @@ test("completion guidance keeps final responses tool-free", () => {
   assert.match(guidance, /blocking user decision/i);
   assert.match(guidance, /sole tool call at a safe checkpoint/i);
   assert.match(guidance, /never re-ask an answered question without new evidence/i);
+  assert.match(guidance, /put compact actionable anchors in planSummary/i);
 });
 
 test("completion requires response text before its tool call", async () => {
@@ -557,7 +558,7 @@ test("explicit plan selects planner and hands approved work to executor session"
     ]);
     assert.equal(
       kickoff,
-      "Inspect the current workspace and validate the approved plan's assumptions before editing. Execute the plan, track todos, and run fresh verification.",
+      "Inspect the current workspace and validate the approved plan's assumptions before editing. Treat paths, symbols, and line ranges in the approved plan as the working set: check them with narrow reads, and call Scout only when repository state changed, anchors are missing, or an unresolved gap requires broader tracing. Execute the plan, track todos, and run fresh verification.",
     );
   } finally {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
