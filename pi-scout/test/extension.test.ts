@@ -127,6 +127,8 @@ test("Scout registers separate repo and web tools; Web Scout fails closed withou
     assert.match(repoGuidance, /sufficient for read-only evaluation by default/i);
     assert.match(repoGuidance, /do not reread cited source unless an exact edit needs current text/i);
     assert.match(repoGuidance, /broad parent context is sent only on the first call/i);
+    assert.match(repoGuidance, /Before any follow-up Scout call, do one bounded parent-side gap pass/i);
+    assert.match(repoGuidance, /do not make serial Scout calls one finding, file, or question at a time/i);
     assert.match(repoGuidance, /do not call Scout again solely because the user approved implementation/i);
     const result = await runtime.tools.get("web_scout").execute("id", { task: "current docs" }, undefined, undefined, context({ hasUI: false }));
     assert.equal(result.details.failureCode, "confirmation_unavailable");
