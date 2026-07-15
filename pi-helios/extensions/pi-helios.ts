@@ -98,7 +98,7 @@ async function withBrowserStatus<T>(ctx: any, action: string, operation: () => P
   finally { if (ctx.hasUI) ctx.ui.setStatus?.("pi-helios", undefined); }
 }
 
-export default function helios(pi: ExtensionAPI) {
+export default function heliosExtension(pi: ExtensionAPI) {
   const exec = (command: string, args: string[], options?: { signal?: AbortSignal; timeout?: number; cwd?: string }) => pi.exec(command, args, options);
   const manager = new BrowserSessionManager(exec);
   let healthDiagnostic: Promise<string> | undefined;

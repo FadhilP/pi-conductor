@@ -5,30 +5,33 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof thinkingLevels)[number];
-export type AdvisorConfig = { schemaVersion: 1; advisorModel?: string; thinking?: ThinkingLevel; useMainModel?: boolean };
+export type AdvisorConfig = { version: 1; advisorModel?: string; thinking?: ThinkingLevel; useMainModel?: boolean };
 export const configPath = (agentDir = getAgentDir()) =>
   join(agentDir, "pi-advisor", "config.json");
 export async function loadConfig(path = configPath()): Promise<AdvisorConfig> {
   try {
     const value = JSON.parse(await readFile(path, "utf8"));
+    const legacy = value?.version === undefined && value?.schemaVersion === 1;
     if (
-      value?.schemaVersion !== 1 ||
+      (value?.version !== 1 && !legacy) ||
       (value.advisorModel !== undefined &&
         (typeof value.advisorModel !== "string" || !value.advisorModel.trim())) ||
       (value.thinking !== undefined && !thinkingLevels.includes(value.thinking)) ||
       (value.useMainModel !== undefined && typeof value.useMainModel !== "boolean")
     )
       throw new Error("invalid config");
-    return {
-      schemaVersion: 1,
+    const config: AdvisorConfig = {
+      version: 1,
       ...(value.advisorModel ? { advisorModel: value.advisorModel } : {}),
       ...(value.thinking ? { thinking: value.thinking } : {}),
       ...(value.useMainModel ? { useMainModel: true } : {}),
     };
+    if (legacy) await saveConfig(config, path).catch(() => {});
+    return config;
   } catch (error: any) {
-    if (error?.code === "ENOENT") return { schemaVersion: 1 };
+    if (error?.code === "ENOENT") return { version: 1 };
     await rename(path, `${path}.corrupt-${randomUUID()}`).catch(() => {});
-    return { schemaVersion: 1 };
+    return { version: 1 };
   }
 }
 export async function saveConfig(

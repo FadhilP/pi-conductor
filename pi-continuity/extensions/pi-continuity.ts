@@ -96,7 +96,7 @@ const Kind = StringEnum([
   ] as const),
   MemAction = StringEnum(["add", "replace", "remove"] as const),
   ScopeName = StringEnum(["user", "project"] as const);
-export default function (pi: ExtensionAPI) {
+export default function continuityExtension(pi: ExtensionAPI) {
   let duplicate = false;
   pi.events.emit("pi-continuity:instance-claim", {
     version: 1,

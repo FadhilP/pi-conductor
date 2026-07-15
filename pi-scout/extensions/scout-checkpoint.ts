@@ -4,7 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { saveCheckpoint } from "../src/checkpoint.ts";
 
-export default function (pi: ExtensionAPI) {
+export default function scoutCheckpointExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "scout_checkpoint",
     label: "Scout Checkpoint",

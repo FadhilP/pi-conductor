@@ -104,7 +104,7 @@ test("doctor reports quarantined state and unavailable configured models", async
     await mkdir(join(root, "pi-advisor"), { recursive: true });
     await mkdir(join(root, "pi-scout"), { recursive: true });
     await mkdir(join(root, "pi-grunt"), { recursive: true });
-    await writeFile(join(root, "pi-advisor", "config.json"), JSON.stringify({ schemaVersion: 1, advisorModel: "openai/test-model" }));
+    await writeFile(join(root, "pi-advisor", "config.json"), JSON.stringify({ version: 1, advisorModel: "openai/test-model" }));
     await writeFile(join(root, "pi-grunt", "config.json"), JSON.stringify({ version: 1, model: "openai/worker-model" }));
     await writeFile(join(root, "pi-scout", "config.json.corrupt-test"), "bad");
     const runtime = harness();

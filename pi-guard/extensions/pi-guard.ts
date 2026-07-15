@@ -4,7 +4,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { commandRisk, pathRisk } from "../src/policy.ts";
 
-export default function (pi: ExtensionAPI) {
+export default function guardExtension(pi: ExtensionAPI) {
   let blocked = 0;
   let confirmed = 0;
   const publish = (ctx: any, decision: string, reason: string) => {

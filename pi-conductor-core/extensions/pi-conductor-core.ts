@@ -9,7 +9,7 @@ import {
   type ToolPolicy,
 } from "../src/tools.ts";
 
-export default function (pi: ExtensionAPI) {
+export default function conductorCoreExtension(pi: ExtensionAPI) {
   const baseline = new Set<string>();
   const managedByOwner = new Map<string, Set<string>>();
   const policies = new Map<string, ToolPolicy>();

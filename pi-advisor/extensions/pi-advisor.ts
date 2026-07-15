@@ -9,7 +9,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { ADVISOR_MAX_CALLS, ADVISOR_PROMPT, capAdvice } from "../src/advisor.ts";
+import { ADVISOR_MAX_CALLS, capAdvice } from "../src/advisor.ts";
+import { ADVISOR_PROMPT } from "../src/prompts.ts";
 import {
   loadConfig,
   parseModelRef,
@@ -67,7 +68,7 @@ function errorCode(
     : "invalid_response";
 }
 
-export default function (pi: ExtensionAPI, completeAdvisor = complete) {
+export default function advisorExtension(pi: ExtensionAPI, completeAdvisor = complete) {
   let calls = 0;
   let previousAdvice: string | undefined;
   let advisorQueue = Promise.resolve();
@@ -455,7 +456,7 @@ export default function (pi: ExtensionAPI, completeAdvisor = complete) {
           );
           if (!ok) return;
         }
-        await saveConfig({ schemaVersion: 1, useMainModel: true });
+        await saveConfig({ version: 1, useMainModel: true });
         await refreshTool(ctx);
         ctx.ui.notify("Advisor enabled; uses current main model and thinking level.", "info");
         return;
@@ -506,7 +507,7 @@ export default function (pi: ExtensionAPI, completeAdvisor = complete) {
         if (!ok) return;
       }
       await saveConfig({
-        schemaVersion: 1,
+        version: 1,
         advisorModel: modelName(model),
         ...(thinking ? { thinking } : {}),
       });

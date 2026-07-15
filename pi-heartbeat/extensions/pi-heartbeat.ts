@@ -8,7 +8,7 @@ import { Type } from "typebox";
 import { JobManager } from "../src/jobs.ts";
 import { jobContext } from "../src/context.ts";
 import { checkWaitMs } from "../src/polling.ts";
-export default function (pi: ExtensionAPI) {
+export default function heartbeatExtension(pi: ExtensionAPI) {
   let manager: JobManager | undefined, lastCtx: any;
   const announced = new Map<string, string>();
   const jobMeta = new Map<string, { todoId?: string; purpose?: string }>();

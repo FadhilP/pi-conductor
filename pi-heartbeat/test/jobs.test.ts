@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { TailBuffer, bounded } from "../src/output.ts";
 import { JobManager, type Job } from "../src/jobs.ts";
 import { jobContext } from "../src/context.ts";
 import { checkWaitMs, MIN_CHECK_INTERVAL_MS } from "../src/polling.ts";
@@ -16,13 +15,6 @@ const logClosed = (job: Job) =>
   job.file.closed
     ? Promise.resolve()
     : new Promise<void>((resolve) => job.file.once("close", () => resolve()));
-
-test("tails bounded", () => {
-  const tail = new TailBuffer(10);
-  tail.append("abcdefghijklmnop");
-  assert.ok(Buffer.byteLength(tail.toString()) <= 10);
-  assert.equal(bounded("a\nb\nc", 100, 2).truncated, true);
-});
 
 test("running status checks stay over 30 seconds apart", async () => {
   const dir = await mkdtemp(join(tmpdir(), "hb-"));

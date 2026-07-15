@@ -88,7 +88,7 @@ function activityText(items: readonly ScoutActivity[]): string {
     .join("\n");
 }
 
-export default function (pi: ExtensionAPI, runRepoScout = runPi) {
+export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
   let repoRuns = 0;
   let repoSessionRuns = 0;
   let repoSessionContextTokens = 0;

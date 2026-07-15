@@ -4,7 +4,14 @@ import {
   normalizeGeneratedTitle,
   promptText,
   promptTitle,
+  SESSION_TITLE_PROMPT,
 } from "../src/prompts.ts";
+
+test("session title prompt defines bounded output", () => {
+  assert.match(SESSION_TITLE_PROMPT, /3-8 word session title/);
+  assert.match(SESSION_TITLE_PROMPT, /maximum 60 characters/);
+  assert.match(SESSION_TITLE_PROMPT, /untrusted data/);
+});
 
 test("prompt preview", () =>
   assert.equal(

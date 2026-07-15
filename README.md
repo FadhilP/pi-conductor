@@ -79,3 +79,13 @@ Packages coordinate through bounded, versioned event-bus metadata while remainin
 - Continuity supports `/plan review`, recording the shared run's `reviewer` phase for Timeline grouping.
 
 Raw verification and Heartbeat logs never cross package events.
+
+## Development
+
+Packages follow the same responsibility-based layout:
+
+- `extensions/` contains Pi entrypoints, registration metadata, and runtime wiring.
+- `src/` contains reusable implementation modules; child/model system prompts live in `src/prompts.ts`.
+- `test/` mirrors the subject under test with `<subject>.test.ts` names.
+
+Keep tool descriptions, `promptSnippet`, and `promptGuidelines` beside their tool registration because they are part of the extension API definition, not standalone model prompts.

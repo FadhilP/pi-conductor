@@ -9,7 +9,7 @@ import { saveConfig } from "../src/config.ts";
 test("parallel Advisor calls serialize and report running duration", async () => {
   const previousDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "pi-advisor-extension-"));
-  await saveConfig({ schemaVersion: 1, advisorModel: "test/model" });
+  await saveConfig({ version: 1, advisorModel: "test/model" });
   let tool: any;
   let active = 0;
   let maxActive = 0;

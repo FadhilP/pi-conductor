@@ -31,7 +31,7 @@ function unavailable(error: unknown): boolean {
   return /ENOENT|not recognized|not found|cannot find/i.test(String(error));
 }
 
-export default function (pi: ExtensionAPI) {
+export default function scoutSearchToolsExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "rg",
     label: "ripgrep",

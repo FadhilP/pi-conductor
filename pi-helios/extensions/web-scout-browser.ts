@@ -18,7 +18,7 @@ function describe(result: BrowserOperationResult, pages: number, maxPages: numbe
   return lines.join("\n");
 }
 
-export default async function webScoutBrowser(pi: ExtensionAPI) {
+export default async function webScoutBrowserExtension(pi: ExtensionAPI) {
   const grant = await consumeWebScoutGrant();
   const proxy = await PublicNetworkProxy.start({ maxRequests: Math.min(1_000, grant.maxActions * 20), maxBytes: 100 * 1024 * 1024 });
   const manager = new BrowserSessionManager(

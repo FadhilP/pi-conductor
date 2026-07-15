@@ -2,7 +2,7 @@
 
 Sequential delegated implementation worker for Pi. Grunt uses a separately configured worker model in an isolated temporary Git worktree while the main model waits. It can implement a compact slice or an entire non-difficult change.
 
-## Install
+## Installation
 
 ```sh
 pi install /absolute/path/to/pi-conductor
@@ -10,7 +10,7 @@ pi install /absolute/path/to/pi-conductor
 
 This installs the complete Pi Conductor bundle, including pi-grunt. Run `/reload` after installation.
 
-## Configure
+## Configuration
 
 ```text
 /grunt provider/model-id

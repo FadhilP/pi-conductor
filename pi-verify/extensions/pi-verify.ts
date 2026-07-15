@@ -45,7 +45,7 @@ type Details = {
   results: Result[];
 };
 
-export default function (pi: ExtensionAPI) {
+export default function verifyExtension(pi: ExtensionAPI) {
   let latestContext: any;
   const worktreeState = async (cwd: string, signal?: AbortSignal) => {
     try {

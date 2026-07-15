@@ -77,7 +77,7 @@ export function usage(ctx: any): string {
   return `in ${compact(input)} · out ${compact(output)} · $${cost.toFixed(3)}${pressure}`;
 }
 
-export default function (pi: ExtensionAPI) {
+export default function focusExtension(pi: ExtensionAPI) {
   let enabled = true;
   let density: Density = "compact";
   let completionBell = false;
