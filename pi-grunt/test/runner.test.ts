@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runPi } from "../src/runner.ts";
+import { GRUNT_CONTEXT_LIMIT, contextTokensFromUsage, runPi } from "../src/runner.ts";
 
 test("runner selects final assistant, sums usage, and exposes activity", async () => {
   const dir = await mkdtemp(join(tmpdir(), "grunt-runner-"));
@@ -44,6 +44,18 @@ test("runner stops before another turn when budget is exhausted", async () => {
   const run = await runPi([], { cwd: dir, maxTurns: 1, maxCostUsd: 2, invocation: { command: process.execPath, args: [script] } });
   assert.equal(run.failure, "budget_exceeded");
   assert.match(run.error ?? "", /turn limit/);
+});
+
+test("runner terminates when reported non-cache context exceeds 262144 tokens", async () => {
+  assert.equal(contextTokensFromUsage({ totalTokens: GRUNT_CONTEXT_LIMIT + 50, cacheRead: 50 }), GRUNT_CONTEXT_LIMIT);
+  assert.equal(contextTokensFromUsage({ input: 200_000, output: 62_145, cacheRead: 500_000, cacheWrite: 0 }), GRUNT_CONTEXT_LIMIT + 1);
+
+  const dir = await mkdtemp(join(tmpdir(), "grunt-context-"));
+  const script = join(dir, "context.mjs");
+  await writeFile(script, `console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'too large'}],stopReason:'toolUse',usage:{input:262145,output:0,cacheRead:500000,cacheWrite:0}}})); setInterval(() => {}, 1000);`);
+  const run = await runPi([], { cwd: dir, invocation: { command: process.execPath, args: [script] } });
+  assert.equal(run.failure, "context_exceeded");
+  assert.match(run.error ?? "", /262145 > 262144 tokens/);
 });
 
 test("runner marks child failures as potentially partial", async () => {

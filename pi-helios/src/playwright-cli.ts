@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { ExecResult } from "@earendil-works/pi-coding-agent";
 import { validatePngFile, type Exec } from "./capture.ts";
 
-const CLI_PATH = fileURLToPath(new URL("../node_modules/@playwright/cli/playwright-cli.js", import.meta.url));
+const CLI_PATH = fileURLToPath(import.meta.resolve("@playwright/cli/playwright-cli.js"));
 const MAX_STDOUT_BYTES = 256 * 1024;
 const MAX_STDERR_BYTES = 16 * 1024;
 const MAX_SNAPSHOT_LINES = 500;

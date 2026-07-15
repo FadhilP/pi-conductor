@@ -9,6 +9,7 @@ test("flags narrow destructive command families", () => {
   assert.equal(commandRisk("rm -rf build"), "recursive deletion");
   assert.equal(commandRisk("git reset --hard HEAD~1"), "destructive Git reset");
   assert.equal(commandRisk("git push origin main --force-with-lease"), "forced Git push");
+  assert.equal(commandRisk("git push -f origin main"), "forced Git push");
   assert.equal(commandRisk("sudo npm test"), "privilege escalation");
   assert.equal(commandRisk("rm file.txt"), undefined);
   assert.equal(commandRisk("git push origin main"), undefined);

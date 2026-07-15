@@ -6,6 +6,7 @@ export type Workspace = {
   id: string;
   canonicalPath: string;
   parentId?: string;
+  projectOwner?: string;
   createdAt: string;
   lastSeenAt: string;
 };
@@ -13,7 +14,8 @@ export function isWorkspace(value: any): value is Workspace {
   return value && typeof value.id === "string" && value.id &&
     typeof value.canonicalPath === "string" && value.canonicalPath &&
     typeof value.createdAt === "string" && typeof value.lastSeenAt === "string" &&
-    (value.parentId === undefined || typeof value.parentId === "string");
+    (value.parentId === undefined || typeof value.parentId === "string") &&
+    (value.projectOwner === undefined || typeof value.projectOwner === "string");
 }
 function isAncestor(parent: Workspace, child: Workspace) {
   const path = relative(parent.canonicalPath, child.canonicalPath);

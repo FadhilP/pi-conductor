@@ -20,7 +20,7 @@ const browserSchema = Type.Object({
   url: Type.Optional(Type.String({ maxLength: 4096 })),
   attachMode: Type.Optional(StringEnum(["cdp", "extension"] as const)),
   endpoint: Type.Optional(Type.String({ maxLength: 2048 })),
-  browser: Type.Optional(StringEnum(["chrome", "msedge"] as const)),
+  browser: Type.Optional(StringEnum(["chrome", "msedge"] as const, { description: "Browser for extension attachment; ignored by start" })),
   target: Type.Optional(Type.String({ maxLength: 32, description: "Element reference from latest snapshot, such as e12" })),
   text: Type.Optional(Type.String({ maxLength: 10000 })),
   key: Type.Optional(Type.String({ maxLength: 64 })),
@@ -234,7 +234,7 @@ export default function helios(pi: ExtensionAPI) {
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const id = sessionId(ctx);
       if (params.action === "start") {
-        rejectExtra(params, ["url"]);
+        rejectExtra(params, ["url", "browser"]);
         if (!ctx.hasUI) throw new Error("Helios browser control requires interactive confirmation");
         const visibility = ownedHeaded ? "visible" : "headless";
         const supervision = ownedHeaded ? "Keep browser visible while supervising consequential actions." : "Headless interaction cannot be visually supervised; do not use it for purchases, messages, publishing, permissions, or destructive actions.";

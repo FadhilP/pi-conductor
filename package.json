@@ -1,6 +1,6 @@
 {
   "name": "pi-conductor",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "private": true,
   "description": "Complete Pi Conductor package with all extensions and themes.",
   "type": "module",
@@ -35,7 +35,9 @@
       "./pi-focus/themes/focus-dark.json"
     ]
   },
-  "dependencies": {},
+  "dependencies": {
+    "@playwright/cli": "0.1.17"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

@@ -28,13 +28,16 @@ Environment controls:
 - `PI_GRUNT_MAX_COST_USD`: maximum reported child cost before another turn is blocked; default `$4`.
 - `PI_GRUNT_PARENT_CONTEXT_CHARS`: redacted parent-context budget; default `0` (disabled), maximum 12,000. Handoffs should be self-contained.
 
+Workers have a fixed 262,144-token reported-context limit. After each assistant response, Grunt counts `totalTokens - cacheRead` when native totals are available, otherwise `input + output + cacheWrite`. Exceeding the limit terminates the child and leaves any isolated edits unapplied.
+
 ## Routing
 
 Use estimated changed LOC only as a soft guide:
 
 - Small: under 50 LOC. Main model usually implements directly.
 - Medium: 50–400 LOC inclusive. Grunt is a good fit when handoff stays compact and validation is easy.
-- Large: over 400 LOC. Grunt is strongly useful for mechanical work; use `high` thinking for semantic edge cases.
+- Large: over 400 LOC. One Grunt call is appropriate for mechanical work.
+- Large non-mechanical change: decompose it into coherent sequential slices, preferably about 200–300 changed LOC or less per semantic slice. Delegate the whole change only when behavior is simple and validation is decisive.
 - Deep architectural change: main model owns architecture. Grunt may implement bounded, non-difficult slices.
 
 Reasoning complexity, architectural coupling, handoff compactness, and validation ease override LOC. A tiny security or concurrency change may still be difficult.
@@ -76,6 +79,6 @@ Before launch, Grunt resolves the temporary worktree's Git top-level and verifie
 
 Blocked, aborted, timed-out, budget-limited, output-limited, failed, stale, or unapplicable work never changes the parent worktree. Only a normal model `stop` can integrate changes. When isolated edits exist, Grunt stores their unapplied patch under the Pi agent directory and reports its path. Successful patches are applied only after the stale-parent checks. Same-repository transactions are queued through cleanup; independent repositories may run independently. Cleanup failures are warnings and never disguise an already-applied result.
 
-Timeout, turn, and reported-cost limits bound runaway workers. Limits are checked after each paid model response, so they prevent another turn rather than undoing cost already incurred. The main model must inspect applied changes and run final verification before completion.
+Timeout, turn, reported-cost, and reported-context limits bound runaway workers. Token, turn, and cost limits are checked after each paid model response, so they prevent another turn rather than undoing cost already incurred. The main model must inspect applied changes and run final verification before completion.
 
 Worktree isolation protects the parent repository from ordinary worker edits; it is not a security sandbox. Pi extensions and child tools run with user permissions. Review package source before installation. Task/context text is sent to the selected model provider under that provider's terms and pricing.

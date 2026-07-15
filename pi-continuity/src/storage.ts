@@ -19,6 +19,23 @@ export async function readJson<T>(
     return structuredClone(fallback);
   }
 }
+
+/** Versioned state deliberately resets rather than attempting a silent migration. */
+export async function readVersionedJson<T>(
+  path: string,
+  fallback: T,
+  valid: (x: any) => boolean,
+): Promise<T> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8"));
+    if (!valid(value)) throw Error("unsupported schema");
+    return value;
+  } catch (error: any) {
+    if (error?.code !== "ENOENT")
+      await rename(path, `${path}.reset-unsupported-${randomUUID()}`);
+    return structuredClone(fallback);
+  }
+}
 async function withLock<T>(path: string, task: () => Promise<T>): Promise<T> {
   const lock = `${path}.lock`;
   await mkdir(dirname(path), { recursive: true });

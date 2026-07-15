@@ -118,7 +118,7 @@ test("Grunt runs synchronously with per-call thinking and derives changed paths"
   }
 });
 
-test("Grunt guidance permits whole non-difficult changes and retains Main ownership", () => {
+test("Grunt guidance decomposes large semantic work and retains Main ownership", () => {
   const events = new Bus();
   const tools = new Map<string, any>();
   const pi: any = {
@@ -134,8 +134,10 @@ test("Grunt guidance permits whole non-difficult changes and retains Main owners
   assert.match(guidance, /medium is 50–400 LOC inclusive/i);
   assert.match(guidance, /large is over 400 LOC/i);
   assert.match(guidance, /Reasoning complexity.*override LOC/i);
+  assert.match(guidance, /Large non-mechanical work must be decomposed into coherent sequential slices/i);
+  assert.match(guidance, /200–300 changed LOC or less per semantic slice/i);
+  assert.match(guidance, /whole large change only when behavior is simple and validation is decisive/i);
   assert.match(guidance, /inspect its applied changes, run focused verification, then invoke the next Grunt/i);
-  assert.match(guidance, /entire change when it is not difficult/i);
   assert.match(guidance, /Main model must own difficult architecture/i);
   assert.match(guidance, /advisor at least once when available/i);
   assert.match(guidance, /Provide grunt suggestedPaths whenever the main model has reliable implementation anchors/i);

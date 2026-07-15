@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -1033,18 +1033,33 @@ test("duplicate continuity instance does not register stale planning handlers", 
 test("memory candidates survive manual and turn-end compact into model context", async () => {
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   const root = await mkdtemp(join(tmpdir(), "continuity-extension-memory-"));
-  const cwd = join(root, "repo");
+  const cwd = join(root, "repo"), agent = join(root, "agent"), notifications: string[] = [],
+    legacy = join(agent, "pi-continuity", "memory-v3");
   await mkdir(cwd);
-  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  await exec("git", ["init", "-q", cwd]);
+  await exec("git", ["-C", cwd, "config", "user.email", "test@example.invalid"]);
+  await exec("git", ["-C", cwd, "config", "user.name", "test"]);
+  await writeFile(join(cwd, "README.md"), "project\n");
+  await exec("git", ["-C", cwd, "add", "."]);
+  await exec("git", ["-C", cwd, "commit", "-qm", "base"]);
+  await mkdir(legacy, { recursive: true });
+  await writeFile(join(legacy, "memory.json"), "legacy");
+  process.env.PI_CODING_AGENT_DIR = agent;
   const ctx: any = {
-    cwd, hasUI: false, mode: "json",
+    cwd, hasUI: true, mode: "json",
     sessionManager: { getSessionId: () => "memory-session" },
-    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+    ui: {
+      notify: (message: string) => notifications.push(message),
+      confirm: async () => true,
+      setStatus: () => {}, setWidget: () => {},
+    },
   };
   try {
     const first = runtime();
     for (const handler of first.handlers.get("session_start") ?? [])
       await handler({ reason: "startup" }, ctx);
+    await first.commands.get("memory").handler("backups", ctx);
+    assert.match(notifications.at(-1)!, /memory-v3\.reset-unsupported-/);
     const result = await first.tools.get("continuity_update").execute(
       "call", {
         action: "memory_candidate",
@@ -1084,10 +1099,69 @@ test("memory candidates survive manual and turn-end compact into model context",
     const memory = await second.handlers.get("before_agent_start")?.[0]({}, ctx);
     assert.match(memory.message.content, /Memory workflow\.verify: Run npm test before release/);
     assert.match(memory.message.content, /Memory workflow\.lint: Run npm run check before release/);
+    await second.commands.get("memory").handler("off", ctx);
+    assert.equal(await second.handlers.get("before_agent_start")?.[0]({}, ctx), undefined);
+    await second.tools.get("continuity_update").execute(
+      "call", { action: "memory_candidate", key: "workflow.toggle", text: "Verify lint release check remains stored" },
+      undefined, undefined, ctx,
+    );
+    await second.commands.get("memory").handler("compact", ctx);
+    assert.equal(await second.handlers.get("before_agent_start")?.[0]({}, ctx), undefined);
+    await second.commands.get("memory").handler("on", ctx);
+    const afterEnable = await second.handlers.get("before_agent_start")?.[0]({}, ctx);
+    assert.match(afterEnable.message.content, /workflow\.toggle/);
+
+    await writeFile(join(cwd, "guide.txt"), "current\n");
+    await second.tools.get("continuity_update").execute(
+      "call", {
+        action: "memory_candidate", key: "workflow.evidence",
+        text: "Verify lint release check obsolete command text", source: "guide.txt",
+        evidencePaths: ["guide.txt"],
+      }, undefined, undefined, ctx,
+    );
+    await second.commands.get("memory").handler("compact", ctx);
+    await writeFile(join(cwd, "guide.txt"), "changed\n");
+    const suspectContext = await second.handlers.get("before_agent_start")?.[0]({}, ctx);
+    assert.match(suspectContext.message.content, /Memory workflow\.evidence \[suspect\]/);
+    assert.doesNotMatch(suspectContext.message.content, /obsolete command text/);
+    await second.commands.get("memory").handler("show", ctx);
+    assert.match(notifications.at(-1)!, /workflow\.evidence \[suspect:/);
+    await second.commands.get("memory").handler("forget suspect", ctx);
+    assert.match(notifications.at(-1)!, /Forgot 1 suspect memory fact/);
+    const afterSuspectCleanup = await second.handlers.get("before_agent_start")?.[0]({}, ctx);
+    assert.doesNotMatch(afterSuspectCleanup.message.content, /workflow\.evidence/);
+
+    const rejectedRemove = await second.tools.get("continuity_update").execute(
+      "call", { action: "memory_candidate", memoryAction: "remove", key: "workflow.lint" },
+      undefined, undefined, ctx,
+    );
+    assert.match(rejectedRemove.content[0].text, /source\/reason/);
+    await second.tools.get("continuity_update").execute(
+      "call", { action: "memory_candidate", memoryAction: "remove", key: "workflow.lint", source: "package.json no longer defines this command" },
+      undefined, undefined, ctx,
+    );
+    await second.commands.get("memory").handler("compact", ctx);
+    const afterModelCleanup = await second.handlers.get("before_agent_start")?.[0]({}, ctx);
+    assert.doesNotMatch(afterModelCleanup.message.content, /workflow\.lint/);
+
     await second.commands.get("memory").handler("forget workflow.verify", ctx);
     const afterForget = await second.handlers.get("before_agent_start")?.[0]({}, ctx);
     assert.doesNotMatch(afterForget.message.content, /workflow\.verify/);
-    assert.match(afterForget.message.content, /workflow\.lint/);
+    const gitDir = join(cwd, ".git"), unavailableGit = join(cwd, ".git-unavailable");
+    await rename(gitDir, unavailableGit);
+    try {
+      const third = runtime();
+      for (const handler of third.handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
+      for (const handler of third.handlers.get("input") ?? [])
+        await handler({ source: "user", text: "verify lint release check" }, ctx);
+      const unavailable = await third.handlers.get("before_agent_start")?.[0]({}, ctx);
+      assert.match(unavailable.message.content, /workflow\.toggle \[unverifiable\]/);
+    } finally { await rename(unavailableGit, gitDir); }
+    await second.commands.get("memory").handler("owners", ctx);
+    const owner = notifications.at(-1)!.split(/\s/)[0]!;
+    assert.match(owner, /^[a-f0-9-]+$/);
+    await second.commands.get("memory").handler(`forget owner ${owner}`, ctx);
+    assert.equal(await second.handlers.get("before_agent_start")?.[0]({}, ctx), undefined);
   } finally {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;

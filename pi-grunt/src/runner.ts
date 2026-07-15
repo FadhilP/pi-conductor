@@ -2,6 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 
+export const GRUNT_CONTEXT_LIMIT = 262_144;
+
 export type ChildUsage = { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 export type WorkerActivity = { kind: "call" | "result"; tool: string; text: string; isError?: boolean };
 export type WorkerRun = {
@@ -10,7 +12,7 @@ export type WorkerRun = {
   model?: string;
   stopReason?: string;
   error?: string;
-  failure?: "aborted" | "timed_out" | "budget_exceeded" | "child_error";
+  failure?: "aborted" | "timed_out" | "budget_exceeded" | "context_exceeded" | "child_error";
   stderr: string;
   durationMs: number;
   usage: ChildUsage;
@@ -32,6 +34,19 @@ type RunOptions = {
 };
 
 const emptyUsage = (): ChildUsage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
+const validTokens = (value: unknown): number => {
+  const tokens = Number(value);
+  return Number.isFinite(tokens) && tokens >= 0 ? tokens : 0;
+};
+export function contextTokensFromUsage(usage: any): number {
+  const cacheRead = validTokens(usage?.cacheRead);
+  const totalTokens = Number(usage?.totalTokens);
+  if (Number.isFinite(totalTokens) && totalTokens > 0)
+    return Math.max(0, totalTokens - cacheRead);
+  const parts = [usage?.input, usage?.output, usage?.cacheRead, usage?.cacheWrite].map(Number);
+  if (!parts.every((value) => Number.isFinite(value) && value >= 0)) return 0;
+  return Math.max(0, parts.reduce((sum, value) => sum + value, 0) - cacheRead);
+}
 
 function capText(text: string, maxBytes = 16 * 1024): { text: string; truncated: boolean } {
   let output = text;
@@ -76,7 +91,7 @@ export async function runPi(args: string[], options: RunOptions): Promise<Worker
   const usages: ChildUsage[] = [];
   const activity: WorkerActivity[] = [];
   let stdout = "", stderr = "", timedOut = false, aborted = false, protocolOverflow = false, protocolMalformed = false;
-  let budgetExceeded = "";
+  let budgetExceeded = "", contextExceeded = "";
   const processLine = (line: string) => {
     if (!line.trim()) return;
     try {
@@ -96,11 +111,14 @@ export async function runPi(args: string[], options: RunOptions): Promise<Worker
       const usage = message.usage ?? {};
       usages.push({ input: usage.input ?? 0, output: usage.output ?? 0, cacheRead: usage.cacheRead ?? 0, cacheWrite: usage.cacheWrite ?? 0, cost: usage.cost?.total ?? 0 });
       const cost = usages.reduce((sum, item) => sum + item.cost, 0);
-      if (message.stopReason === "toolUse" && options.maxTurns !== undefined && messages.length >= options.maxTurns)
+      const contextTokens = contextTokensFromUsage(usage);
+      if (contextTokens > GRUNT_CONTEXT_LIMIT)
+        contextExceeded = `Worker exceeded context limit (${contextTokens} > ${GRUNT_CONTEXT_LIMIT} tokens).`;
+      else if (message.stopReason === "toolUse" && options.maxTurns !== undefined && messages.length >= options.maxTurns)
         budgetExceeded = `Worker reached turn limit (${options.maxTurns}).`;
       else if (message.stopReason === "toolUse" && options.maxCostUsd !== undefined && cost >= options.maxCostUsd)
         budgetExceeded = `Worker reached cost limit ($${options.maxCostUsd.toFixed(2)}).`;
-      if (budgetExceeded) terminate(child);
+      if (contextExceeded || budgetExceeded) terminate(child);
     } catch { protocolMalformed = true; }
   };
   child.stdout!.on("data", (data) => {
@@ -130,12 +148,13 @@ export async function runPi(args: string[], options: RunOptions): Promise<Worker
   const rawText = final?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n") ?? "";
   const capped = capText(rawText);
   const incomplete = final?.stopReason !== "stop";
-  const failure = aborted ? "aborted" : timedOut ? "timed_out" : budgetExceeded ? "budget_exceeded"
-    : protocolOverflow || protocolMalformed || exitCode !== 0 || incomplete || !rawText ? "child_error" : undefined;
+  const failure = aborted ? "aborted" : timedOut ? "timed_out" : contextExceeded ? "context_exceeded"
+    : budgetExceeded ? "budget_exceeded" : protocolOverflow || protocolMalformed || exitCode !== 0 || incomplete || !rawText ? "child_error" : undefined;
   const error = protocolOverflow ? "Worker protocol output exceeded 1 MiB."
     : protocolMalformed ? "Worker emitted malformed JSON protocol output."
     : aborted ? "Worker aborted; edits may remain."
     : timedOut ? "Worker timed out; edits may remain."
+    : contextExceeded ? contextExceeded
     : budgetExceeded ? budgetExceeded
     : exitCode !== 0 ? `Worker exited with code ${exitCode}; edits may remain.`
     : final?.stopReason === "error" ? final.errorMessage || "Worker model error; edits may remain."

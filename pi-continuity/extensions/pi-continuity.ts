@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile, readdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
@@ -18,6 +19,7 @@ import {
 } from "../src/active-work.ts";
 import {
   readJson,
+  readVersionedJson,
   writeJson,
   updateJson,
   withStateLock,
@@ -29,15 +31,21 @@ import {
   candidate,
   compact,
   normalizeCandidatesFile,
+  normalizeMemoryFile,
+  factsForOwners,
   isMemoryFile,
+  MEMORY_SCHEMA_VERSION,
   type PendingCandidate,
   type Fact,
+  type Scope,
+  type FactStatus,
+  factIdentity,
 } from "../src/memory.ts";
 import { assertSafe } from "../src/secrets.ts";
 import { blocked, planningTools } from "../src/plan-gate.ts";
-import { buildContext } from "../src/context.ts";
+import { buildContext, shortlistFacts, type MemoryNotice } from "../src/context.ts";
 import { validateQuestion } from "../src/questions.ts";
-import { worktreeFingerprint } from "../src/worktree.ts";
+import { captureEvidence, classifyProjectFacts, projectContext, worktreeFingerprint, type ProjectContext } from "../src/worktree.ts";
 import {
   loadConfig,
   parseModelRef,
@@ -86,7 +94,8 @@ const Kind = StringEnum([
     "state",
     "memory_candidate",
   ] as const),
-  MemAction = StringEnum(["add", "replace", "remove"] as const);
+  MemAction = StringEnum(["add", "replace", "remove"] as const),
+  ScopeName = StringEnum(["user", "project"] as const);
 export default function (pi: ExtensionAPI) {
   let duplicate = false;
   pi.events.emit("pi-continuity:instance-claim", {
@@ -108,10 +117,12 @@ export default function (pi: ExtensionAPI) {
     all: Workspace[] = [],
     work: Work | undefined,
     facts: Fact[] = [],
-    parentFacts: Fact[] = [],
+    memoryFacts: Fact[] = [],
     candidates: PendingCandidate[] = [],
+    project: ProjectContext | undefined,
     savedTools: string[] | undefined,
     lastPrompt = "",
+    memoryInjectionEnabled = true,
     tasksVisible = true,
     currentCwd = "",
     latestVerification: any,
@@ -191,22 +202,65 @@ export default function (pi: ExtensionAPI) {
   };
   const paths = () => ({
     work: workFile,
-    memory: join(dir, "memory.json"),
-    candidates: join(dir, "candidates.json"),
+    memory: join(root, "memory-v4", "memory.json"),
+    candidates: join(root, "memory-v4", "candidates.json"),
   });
-  const validCandidatesFile = (value: any) =>
-    normalizeCandidatesFile(value) !== undefined;
+  const memoryDirectory = () => join(root, "memory-v4");
+  const validCandidatesFile = (value: any) => normalizeCandidatesFile(value) !== undefined;
   const readCandidateQueue = async () => {
-    const fallback = {
-      schemaVersion: 1 as const,
-      candidates: [] as PendingCandidate[],
-    };
-    const loaded = await readJson(
-      paths().candidates,
-      fallback,
-      validCandidatesFile,
+    const fallback = { schemaVersion: MEMORY_SCHEMA_VERSION, candidates: [] as PendingCandidate[] };
+    return normalizeCandidatesFile(await readVersionedJson(paths().candidates, fallback, validCandidatesFile))!;
+  };
+  const readMemory = async () => {
+    const fallback = { schemaVersion: MEMORY_SCHEMA_VERSION, facts: [] as Fact[] };
+    return normalizeMemoryFile(await readVersionedJson(paths().memory, fallback, isMemoryFile))!;
+  };
+  const ownerFor = (scope: Scope) =>
+    scope === "user" ? "default" : project?.owner;
+  const resolveProject = async (cwd: string) => {
+    const resolved = await projectContext(cwd, workspace?.projectOwner ?? project?.owner ?? workspace!.id);
+    project = resolved;
+    if (workspace && resolved.owner !== workspace.id && workspace.projectOwner !== resolved.owner) {
+      workspace.projectOwner = resolved.owner;
+      all = await updateJson<Workspace[]>(join(root, "workspaces.json"), [], (items) =>
+        items.map((item) => item.id === workspace!.id ? { ...item, projectOwner: resolved.owner } : item), Array.isArray);
+    }
+    return resolved;
+  };
+  // Experimental schemas deliberately start clean rather than silently migrating.
+  const resetLegacyWorkspaceMemory = async () => {
+    for (const legacyShared of [join(root, "memory-v2"), join(root, "memory-v3")]) await rename(legacyShared, `${legacyShared}.reset-unsupported-${randomUUID()}`).catch((error: any) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+    for (const name of ["memory.json", "candidates.json"]) {
+      const path = join(dir, name);
+      try {
+        const value = JSON.parse(await readFile(path, "utf8"));
+        if (value?.schemaVersion !== MEMORY_SCHEMA_VERSION)
+          await rename(path, `${path}.reset-unsupported-${randomUUID()}`);
+      } catch (error: any) {
+        if (error?.code !== "ENOENT")
+          await rename(path, `${path}.reset-unsupported-${randomUUID()}`).catch(() => {});
+      }
+    }
+  };
+  const visibleFacts = async (query: string, active?: Work) => {
+    project = await resolveProject(currentCwd);
+    // Classify the complete bounded relevant pool before final three-slot selection.
+    const owned = factsForOwners(memoryFacts, project.owner), projectFacts = shortlistFacts(
+      owned.filter((fact) => fact.scope === "project"), query, active, 30,
     );
-    return normalizeCandidatesFile(loaded)!;
+    const classified = await classifyProjectFacts(currentCwd, projectFacts);
+    const notices: MemoryNotice[] = classified
+      .filter((item) => item.status === "suspect" || item.status === "unverifiable")
+      .slice(0, 2)
+      .map((item) => ({ key: item.fact.key, status: item.status as "suspect" | "unverifiable", reason: item.reason }));
+    return {
+      facts: [...owned.filter((fact) => fact.scope === "user"), ...classified
+        .filter((item) => item.status === "active" || item.status === "unchecked")
+        .map((item) => item.fact)],
+      notices,
+    };
   };
   const saveWork = async () => {
     if (work) {
@@ -247,28 +301,37 @@ export default function (pi: ExtensionAPI) {
     if (ctx.mode === "tui") ctx.ui.setWidget("pi-continuity", undefined);
   };
   const compactMemory = async () =>
-    withStateLock(dir, async () => {
-      const latestFacts = (
-          await readJson(
-            paths().memory,
-            { schemaVersion: 1 as const, facts: [] as Fact[] },
-            isMemoryFile,
-          )
-        ).facts,
+    withStateLock(memoryDirectory(), async () => {
+      const latestFacts = (await readMemory()).facts,
         latestCandidates = (await readCandidateQueue()).candidates;
-      facts = latestFacts;
+      memoryFacts = latestFacts;
       candidates = latestCandidates;
       if (!candidates.length) return;
-      const result = compact(facts, candidates, 80);
-      facts = result.facts;
-      candidates = result.candidates;
+      project = await resolveProject(currentCwd);
+      const currentCandidates = candidates.filter((item) =>
+        item.scope === "user" && item.owner === "default" ||
+        item.scope === "project" && item.owner === project!.owner);
+      if (!currentCandidates.length) return;
+      // Never compact or inspect another owner's project against the current repository.
+      const provisional = compact(memoryFacts, currentCandidates, Number.MAX_SAFE_INTEGER).facts;
+      const priority = new Map<string, FactStatus>();
+      for (const fact of provisional.filter((item) => item.scope === "user" && item.owner === "default"))
+        priority.set(factIdentity(fact), "unchecked");
+      for (const item of await classifyProjectFacts(currentCwd, provisional.filter((fact) =>
+        fact.scope === "project" && fact.owner === project!.owner,
+      ))) priority.set(factIdentity(item.fact), item.status);
+      // Keep 30 global user facts and 30 facts independently for each project.
+      const result = compact(memoryFacts, currentCandidates, 30, priority);
+      memoryFacts = result.facts;
+      facts = memoryFacts;
+      candidates = latestCandidates.filter((item) => !currentCandidates.includes(item));
       await writeJson(paths().memory, {
-        schemaVersion: 1,
-        facts,
+        schemaVersion: MEMORY_SCHEMA_VERSION,
+        facts: memoryFacts,
         updatedAt: new Date().toISOString(),
       });
       await writeJson(paths().candidates, {
-        schemaVersion: 1,
+        schemaVersion: MEMORY_SCHEMA_VERSION,
         candidates,
       });
     });
@@ -351,6 +414,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_e, ctx) => {
     sessionGeneration++;
     currentCwd = ctx.cwd;
+    memoryInjectionEnabled = true;
     recentCalls.clear();
     pendingBash.clear();
     latestVerification = ([...(ctx.sessionManager.getEntries?.() ?? [])]
@@ -367,6 +431,7 @@ export default function (pi: ExtensionAPI) {
       sessionWorkFile(ctx.sessionManager.getSessionId()),
     );
     const p = paths();
+    await resetLegacyWorkspaceMemory();
     work = await readJson<Work | undefined>(
       p.work,
       undefined,
@@ -413,22 +478,10 @@ export default function (pi: ExtensionAPI) {
         pendingApproval = { runId: work.runId, revision: work.planRevision };
       if (changed) await saveWork();
     }
-    facts = (
-      await readJson(p.memory, { schemaVersion: 1 as const, facts: [] as Fact[] }, isMemoryFile)
-    ).facts;
+    project = await resolveProject(ctx.cwd);
+    memoryFacts = (await readMemory()).facts;
+    facts = memoryFacts;
     candidates = (await readCandidateQueue()).candidates;
-    const parent = workspace.parentId
-      ? all.find((item) => item.id === workspace!.parentId)
-      : undefined;
-    parentFacts = parent
-      ? (
-          await readJson(
-            join(root, "workspaces", parent.id, "memory.json"),
-            { schemaVersion: 1 as const, facts: [] as Fact[] },
-            isMemoryFile,
-          )
-        ).facts
-      : [];
     gate(work?.mode === "planning");
     tasksVisible = true;
     refresh(ctx);
@@ -525,10 +578,13 @@ export default function (pi: ExtensionAPI) {
     work && !["handed_off", "completed", "cancelled"].includes(work.mode)
       ? work
       : undefined;
-  pi.on("before_agent_start", () => {
+  pi.on("before_agent_start", async () => {
+    if (!memoryInjectionEnabled) return;
     const active = activeWork();
     const query = `${lastPrompt} ${active?.goal || ""} ${active?.todos.find((todo) => todo.id === active.currentTodoId)?.text || ""}`;
-    const text = buildContext(undefined, facts, query, 250, parentFacts);
+    const visible = await visibleFacts(query, active);
+    facts = visible.facts;
+    const text = buildContext(undefined, facts, query, 250, [], visible.notices);
     if (text)
       return {
         message: {
@@ -565,7 +621,7 @@ export default function (pi: ExtensionAPI) {
       "Update plan, todos, state, clarification, or durable-memory candidate.",
     executionMode: "sequential",
     promptGuidelines: [
-      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list, starts its first todo, and does not activate the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. Clarification questions must ask one concrete decision in plain language, explain why the answer matters in one short sentence when needed, and avoid vague prompts such as 'What do you prefer?'. Use short distinct option labels; descriptions state the practical outcome or tradeoff. Put the recommended option first and say why in its description. Do not ask questions answerable from repository evidence or safe defaults. During explicit planning, Continuity owns plan presentation: populate goal, planSummary as the approach, constraints, and ordered todos; do not invent a separate plan format. Outside explicit planning, set_plan creates an internal execution task list only; do not present it to the user as a structured plan. When planning used Scout, put compact actionable anchors in planSummary: relevant paths, symbols, line ranges, assumptions, and unresolved gaps; do not copy the raw Scout report. During execution, use clarify only for a new blocking user decision that cannot be safely inferred, only as the sole tool call at a safe checkpoint; prefer asking before mutation, stabilize any atomic operation first, and never re-ask an answered question without new evidence. During execution, use exact todo IDs from Continuity context. Complete current work and start the next todo atomically by passing nextTodoId with status done; omit nextTodoId for the final todo. Mark mutation work done immediately after verification. Skip Verify for read-only work. Run Verify and all nonterminal continuity updates in tool-only assistant turns before the final response. Once every todo is done and verification has passed when required, write the final user-facing response with no tool calls; Continuity completes automatically. Do not call tools after final text. Keep completion true for explicit allowUnverified fallback or compatibility only; it still requires preceding response text. Record concise failures/next action. Propose memory only when all three hold: evidence supports it (user instruction, verified repository/tool evidence, or repeated observation); it is likely true and useful in future sessions; it changes a future decision or avoids repeated work. Include evidence in source. Good candidates include user preferences, validated commands, project conventions, canonical paths, architecture boundaries, recurring warnings, and durable tool limitations. Never save task progress, guesses, one-time errors, temporary file state, generic facts, duplicates, or secrets. Reuse stable keys; add and replace both set one fact per key.",
+      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list, starts its first todo, and does not activate the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. Clarification questions must ask one concrete decision in plain language, explain why the answer matters in one short sentence when needed, and avoid vague prompts such as 'What do you prefer?'. Use short distinct option labels; descriptions state the practical outcome or tradeoff. Put the recommended option first and say why in its description. Do not ask questions answerable from repository evidence or safe defaults. During explicit planning, Continuity owns plan presentation: populate goal, planSummary as the approach, constraints, and ordered todos; do not invent a separate plan format. Outside explicit planning, set_plan creates an internal execution task list only; do not present it to the user as a structured plan. When planning used Scout, put compact actionable anchors in planSummary: relevant paths, symbols, line ranges, assumptions, and unresolved gaps; do not copy the raw Scout report. During execution, use clarify only for a new blocking user decision that cannot be safely inferred, only as the sole tool call at a safe checkpoint; prefer asking before mutation, stabilize any atomic operation first, and never re-ask an answered question without new evidence. During execution, use exact todo IDs from Continuity context. Complete current work and start the next todo atomically by passing nextTodoId with status done; omit nextTodoId for the final todo. Mark mutation work done immediately after verification. Skip Verify for read-only work. Run Verify and all nonterminal continuity updates in tool-only assistant turns before the final response. Once every todo is done and verification has passed when required, write the final user-facing response with no tool calls; Continuity completes automatically. Do not call tools after final text. Keep completion true for explicit allowUnverified fallback or compatibility only; it still requires preceding response text. Record concise failures/next action. Propose memory only when all three hold: evidence supports it (user instruction, verified repository/tool evidence, or repeated observation); it is likely true and useful in future sessions; it changes a future decision or avoids repeated work. Include evidence in source. Good candidates include user preferences, validated commands, project conventions, canonical paths, architecture boundaries, recurring warnings, and durable tool limitations. Never save task progress, guesses, one-time errors, temporary file state, generic facts, duplicates, or secrets. With direct user or current repository evidence, replace a fact when it remains true or a newer truth is known, and remove it when contradicted; otherwise leave suspect facts alone. Supply evidencePaths when repository files support a project-memory mutation. Reuse stable keys; add and replace both set one fact per key. Remove requires the exact key and a nonempty source/reason. Use user scope only for durable cross-project preferences; use project scope for everything project-specific.",
     ],
     renderShell: "self",
     renderCall: () => new Container(),
@@ -633,10 +689,14 @@ export default function (pi: ExtensionAPI) {
         latestFailure: Type.Optional(Type.String({ maxLength: 1000 })),
         nextAction: Type.Optional(Type.String({ maxLength: 1000 })),        completion: Type.Optional(Type.Boolean()),
         allowUnverified: Type.Optional(Type.Boolean({ description: "Explicitly allow completion only when Verify reports clean or no declared checks." })),
-        key: Type.Optional(Type.String({ maxLength: 200 })),        kind: Type.Optional(Kind),
+        key: Type.Optional(Type.String({ maxLength: 200 })),
+        kind: Type.Optional(Kind),
         text: Type.Optional(Type.String({ maxLength: 1000 })),
-        source: Type.Optional(Type.String({ maxLength: 500 })),        confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+        source: Type.Optional(Type.String({ maxLength: 500 })),
+        confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
         memoryAction: Type.Optional(MemAction),
+        scope: Type.Optional(ScopeName),
+        evidencePaths: Type.Optional(Type.Array(Type.String({ maxLength: 240 }), { maxItems: 5 })),
       },
       { additionalProperties: false },
     ),
@@ -761,46 +821,39 @@ export default function (pi: ExtensionAPI) {
         };
       }
       if (p.action === "memory_candidate") {
-        if (
-          !p.key ||
-          !p.kind ||
-          !p.text ||
-          !p.source ||
-          p.confidence === undefined ||
-          !p.memoryAction
-        )
-          return {
-            content: [
-              { type: "text", text: "Missing memory candidate fields." },
-            ],
-          };
-        const next = candidate({
-          key: p.key,
-          kind: p.kind,
-          text: p.text,
-          source: p.source,
-          confidence: p.confidence,
-          action: p.memoryAction,
-        });
-        candidates = await withStateLock(dir, async () =>
-          (
+        const requestedScope = (p.scope ?? "project") as Scope;
+        if (requestedScope === "project") project = await resolveProject(ctx.cwd);
+        const owner = ownerFor(requestedScope)!;
+        try {
+          if (requestedScope === "user" && p.evidencePaths?.length)
+            throw Error("user memory cannot capture project evidence");
+          const evidence = requestedScope === "project" && p.evidencePaths?.length
+            ? await captureEvidence(ctx.cwd, p.evidencePaths) : undefined;
+          const next = candidate({
+            key: p.key, kind: p.kind, text: p.text, source: p.source,
+            confidence: p.confidence, action: p.memoryAction, scope: requestedScope,
+          }, {
+            scope: requestedScope,
+            owner,
+            // Callers cannot supply hashes, ownership, or Git provenance.
+            ...(requestedScope === "project" ? project : {}),
+            ...(evidence?.length ? { evidencePaths: evidence } : {}),
+          });
+          candidates = await withStateLock(memoryDirectory(), async () => (
             await updateJson(
               paths().candidates,
-              { schemaVersion: 1 as const, candidates: [] as PendingCandidate[] },
+              { schemaVersion: MEMORY_SCHEMA_VERSION, candidates: [] as PendingCandidate[] },
               (file) => ({
-                schemaVersion: 1 as const,
-                candidates: [
-                  ...normalizeCandidatesFile(file)!.candidates,
-                  next,
-                ],
+                schemaVersion: MEMORY_SCHEMA_VERSION,
+                candidates: [...normalizeCandidatesFile(file)!.candidates, next],
               }),
               validCandidatesFile,
             )
-          ).candidates,
-        );
-        return {
-          content: [{ type: "text", text: "Memory candidate stored." }],
-        };
+          ).candidates);
+        } catch (error: any) {
+          return { content: [{ type: "text", text: error?.message ?? "Invalid memory candidate." }] };
+        }
+        return { content: [{ type: "text", text: "Memory candidate stored." }] };
       }
       if (!work)
         return { content: [{ type: "text", text: "No active work." }] };
@@ -1203,79 +1256,104 @@ export default function (pi: ExtensionAPI) {
       ),
   });
   pi.registerCommand("memory", {
-    description: "Inspect, compact, or forget workspace memory",
+    description: "Inspect, compact, or forget project memory",
     handler: async (args, ctx) => {
       const sub = args.trim();
-      if (sub === "compact") {
+      if (sub === "off") {
+        memoryInjectionEnabled = false;
+        ctx.ui.notify("Memory injection disabled for this session.", "info");
+      } else if (sub === "on") {
+        memoryInjectionEnabled = true;
+        ctx.ui.notify("Memory injection enabled for this session.", "info");
+      } else if (sub === "backups") {
+        const shared = (await readdir(root).catch(() => []))
+            .filter((name) => name.includes(".reset-unsupported-")).map((name) => join(root, name)),
+          local = (await readdir(dir).catch(() => []))
+            .filter((name) => name.includes(".reset-unsupported-")).map((name) => join(dir, name));
+        ctx.ui.notify([...shared, ...local].join("\n") || "No memory reset backups.", "info");
+      } else if (sub === "compact") {
         await compactMemory();
         ctx.ui.notify(
           `Applied memory candidates. ${facts.length} facts.`,
           "info",
         );
-      } else if (sub === "show")
-        ctx.ui.notify(
-          facts.map((f) => `${f.key}: ${f.text}`).join("\n") || "No facts.",
-          "info",
-        );
-      else if (sub === "forget workspace") {
-        if (
-          !ctx.hasUI ||
-          !(await ctx.ui.confirm(
-            "Forget continuity workspace?",
-            workspace?.canonicalPath || ctx.cwd,
-          ))
-        )
-          return;
-        await rm(dir, { recursive: true, force: true });
-        if (workspace)
-          await updateJson<Workspace[]>(
-            join(root, "workspaces.json"),
-            [],
-            (items) =>
-              items
-                .filter((item) => item.id !== workspace!.id)
-                .map((item) =>
-                  item.parentId === workspace!.id
-                    ? (({ parentId: _parentId, ...rest }) => rest)(item)
-                    : item,
-                ),
-            Array.isArray,
-          );
-        work = undefined;
-        facts = [];
-        candidates = [];
-        gate(false);
-        refresh(ctx);
-      } else if (sub.startsWith("forget ")) {
-        const key = sub.slice("forget ".length).trim();
-        if (!key) return void ctx.ui.notify("Memory key required.", "error");
-        let removed = false;
-        await withStateLock(dir, async () => {
-          const latestFacts = (
-              await readJson(
-                paths().memory,
-                { schemaVersion: 1 as const, facts: [] as Fact[] },
-                isMemoryFile,
-              )
-            ).facts,
-            latestCandidates = (await readCandidateQueue()).candidates;
-          removed = latestFacts.some((fact) => fact.key === key);
-          facts = latestFacts.filter((fact) => fact.key !== key);
-          candidates = latestCandidates.filter((item) => item.key !== key);
-          await writeJson(paths().memory, {
-            schemaVersion: 1,
-            facts,
-            updatedAt: new Date().toISOString(),
-          });
-          await writeJson(paths().candidates, {
-            schemaVersion: 1,
-            candidates,
-          });
+      } else if (sub === "show") {
+        project = await resolveProject(ctx.cwd);
+        const owned = factsForOwners(memoryFacts, project.owner), statuses = new Map<string, { status: FactStatus; reason: string }>();
+        for (const fact of owned.filter((item) => item.scope === "user")) statuses.set(factIdentity(fact), { status: "unchecked", reason: "user memory" });
+        for (const item of await classifyProjectFacts(ctx.cwd, owned.filter((item) => item.scope === "project")))
+          statuses.set(factIdentity(item.fact), { status: item.status, reason: item.reason });
+        ctx.ui.notify(owned.map((fact) => {
+          const state = statuses.get(factIdentity(fact))!;
+          const provenance = fact.evidencePaths?.length ? `${fact.evidencePaths.length} evidence file(s)` : fact.captureCommit ? "capture commit" : "no provenance";
+          return `${fact.scope}/${fact.key} [${state.status}: ${state.reason}; ${provenance}]: ${fact.text}`;
+        }).join("\n") || "No facts.", "info");
+      } else if (sub === "owners") {
+        project = await resolveProject(ctx.cwd);
+        const counts = new Map<string, number>();
+        for (const item of [...memoryFacts, ...candidates]) counts.set(item.owner!, (counts.get(item.owner!) ?? 0) + 1);
+        ctx.ui.notify([...counts].map(([owner, count]) => `${owner}${owner === project!.owner || owner === "default" ? " (current)" : ""}: ${count}`).join("\n") || "No owners.", "info");
+      } else if (sub === "forget project") {
+        if (!ctx.hasUI || !(await ctx.ui.confirm("Forget project memory?", workspace?.canonicalPath || ctx.cwd))) return;
+        project = await resolveProject(ctx.cwd);
+        await withStateLock(memoryDirectory(), async () => {
+          const latestFacts = (await readMemory()).facts, latestCandidates = (await readCandidateQueue()).candidates;
+          memoryFacts = latestFacts.filter((fact) => fact.scope !== "project" || fact.owner !== project!.owner);
+          candidates = latestCandidates.filter((item) => item.scope !== "project" || item.owner !== project!.owner);
+          await writeJson(paths().memory, { schemaVersion: MEMORY_SCHEMA_VERSION, facts: memoryFacts, updatedAt: new Date().toISOString() });
+          await writeJson(paths().candidates, { schemaVersion: MEMORY_SCHEMA_VERSION, candidates });
         });
-        ctx.ui.notify(removed ? `Forgot memory ${key}.` : `Memory ${key} not found.`, "info");
+        facts = memoryFacts;
+      } else if (sub === "forget suspect") {
+        if (!ctx.hasUI || !(await ctx.ui.confirm("Forget currently suspect project memory?", workspace?.canonicalPath || ctx.cwd))) return;
+        project = await resolveProject(ctx.cwd);
+        let removed = 0;
+        await withStateLock(memoryDirectory(), async () => {
+          const latestFacts = (await readMemory()).facts;
+          // Reclassify under the lock; unverifiable facts are deliberately retained.
+          const suspect = new Set((await classifyProjectFacts(ctx.cwd, latestFacts.filter((fact) =>
+            fact.scope === "project" && fact.owner === project!.owner,
+          ))).filter((item) => item.status === "suspect").map((item) => factIdentity(item.fact)));
+          removed = suspect.size;
+          memoryFacts = latestFacts.filter((fact) => !suspect.has(factIdentity(fact)));
+          candidates = (await readCandidateQueue()).candidates.filter((item) => !suspect.has(factIdentity(item)));
+          await writeJson(paths().memory, { schemaVersion: MEMORY_SCHEMA_VERSION, facts: memoryFacts, updatedAt: new Date().toISOString() });
+          await writeJson(paths().candidates, { schemaVersion: MEMORY_SCHEMA_VERSION, candidates });
+        });
+        facts = memoryFacts;
+        ctx.ui.notify(`Forgot ${removed} suspect memory fact(s).`, "info");
+      } else if (sub.startsWith("forget owner ")) {
+        const owner = sub.slice("forget owner ".length).trim();
+        if (!owner) return void ctx.ui.notify("Owner ID required.", "error");
+        if (!ctx.hasUI || !(await ctx.ui.confirm("Forget owner memory?", owner))) return;
+        await withStateLock(memoryDirectory(), async () => {
+          memoryFacts = (await readMemory()).facts.filter((fact) => fact.owner !== owner);
+          candidates = (await readCandidateQueue()).candidates.filter((item) => item.owner !== owner);
+          await writeJson(paths().memory, { schemaVersion: MEMORY_SCHEMA_VERSION, facts: memoryFacts, updatedAt: new Date().toISOString() });
+          await writeJson(paths().candidates, { schemaVersion: MEMORY_SCHEMA_VERSION, candidates });
+        });
+        facts = memoryFacts;
+      } else if (sub.startsWith("forget ")) {
+        const target = sub.slice("forget ".length).trim();
+        const match = /^(user|project)\s+(.+)$/.exec(target);
+        const scope = (match?.[1] ?? "project") as Scope, key = (match?.[2] ?? target).trim();
+        if (!key) return void ctx.ui.notify("Memory key required.", "error");
+        project = await resolveProject(ctx.cwd);
+        const owner = scope === "user" ? "default" : project.owner;
+        let removed = false;
+        await withStateLock(memoryDirectory(), async () => {
+          const latestFacts = (await readMemory()).facts, latestCandidates = (await readCandidateQueue()).candidates;
+          removed = latestFacts.some((fact) => fact.scope === scope && fact.owner === owner && fact.key === key);
+          memoryFacts = latestFacts.filter((fact) => fact.scope !== scope || fact.owner !== owner || fact.key !== key);
+          candidates = latestCandidates.filter((item) => item.scope !== scope || item.owner !== owner || item.key !== key);
+          await writeJson(paths().memory, { schemaVersion: MEMORY_SCHEMA_VERSION, facts: memoryFacts, updatedAt: new Date().toISOString() });
+          await writeJson(paths().candidates, { schemaVersion: MEMORY_SCHEMA_VERSION, candidates });
+        });
+        facts = memoryFacts;
+        ctx.ui.notify(removed ? `Forgot memory ${scope}/${key}.` : `Memory ${scope}/${key} not found.`, "info");
       } else
         ctx.ui.notify(
-          `${facts.length} facts, ${candidates.length} pending candidates.`,
+          `Injection ${memoryInjectionEnabled ? "on" : "off"}; ${facts.length} facts, ${candidates.length} pending candidates.`,
           "info",
         );
     },

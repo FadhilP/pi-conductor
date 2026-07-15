@@ -8,7 +8,7 @@ const commandRules: Array<[RegExp, string]> = [
   [/\bRemove-Item\b[^\n;|]*-(?:Recurse|Force)\b/i, "recursive or forced deletion"],
   [/\bgit\s+reset\s+--hard\b/i, "destructive Git reset"],
   [/\bgit\s+clean\s+-[a-z]*f/i, "destructive Git clean"],
-  [/\bgit\s+push\b[^\n;&|]*\s--force(?:-with-lease)?\b/i, "forced Git push"],
+  [/\bgit\s+push\b[^\n;&|]*\s(?:-f|--force(?:-with-lease)?)\b/i, "forced Git push"],
   [/\b(?:mkfs(?:\.[a-z0-9]+)?|diskpart)\b/i, "disk modification"],
   [/\bdd\b[^\n;&|]*\bof=\s*\/dev\//i, "raw device write"],
   [/\b(?:chmod|chown)\b[^\n;&|]*\s-R\b/i, "recursive permission change"],

@@ -218,7 +218,7 @@ test("browser start refuses no UI and decline invokes no CLI", async () => {
   const { tools } = runtime({ exec: async () => { calls++; return successfulLookup(); } });
   const browser = tools.get("helios_browser");
   await assert.rejects(browser.execute("id", { action: "start" }, undefined, undefined, context({ hasUI: false })), /interactive confirmation/);
-  const declined = await browser.execute("id", { action: "start" }, undefined, undefined, context({ ui: { async confirm() { return false; } } }));
+  const declined = await browser.execute("id", { action: "start", browser: "chrome" }, undefined, undefined, context({ ui: { async confirm() { return false; } } }));
   assert.equal(declined.details.declined, true);
   assert.equal(calls, 0);
 });
