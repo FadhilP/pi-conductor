@@ -6,6 +6,7 @@ export const INSPECTION = new Set([
   "find",
   "ls",
   "continuity_update",
+  "memory",
   "repo_scout",
   "advisor",
 ]);

@@ -75,9 +75,13 @@ function runtime() {
   };
 }
 
-test("completion guidance keeps final responses tool-free", () => {
+test("continuity and memory guidance stay dedicated", () => {
   const app = runtime();
-  const guidance = app.tools.get("continuity_update").promptGuidelines.join("\n");
+  const continuity = app.tools.get("continuity_update");
+  const memory = app.tools.get("memory");
+  const guidance = continuity.promptGuidelines.join("\n");
+  const memoryGuidance = memory.promptGuidelines.join("\n");
+  assert.match(continuity.promptSnippet, /planning.*todo\/state.*clarification/i);
   assert.match(guidance, /tool-only assistant turns/i);
   assert.match(guidance, /final user-facing response with no tool calls/i);
   assert.match(guidance, /Continuity completes automatically/i);
@@ -90,6 +94,19 @@ test("completion guidance keeps final responses tool-free", () => {
   assert.match(guidance, /During explicit planning, Continuity owns plan presentation/i);
   assert.match(guidance, /internal execution task list only/i);
   assert.match(guidance, /put compact actionable anchors in planSummary/i);
+  assert.doesNotMatch(guidance, /memory|durable/i);
+  assert.deepEqual(continuity.parameters.properties.action.enum, ["clarify", "set_plan", "todo", "state"]);
+  for (const field of ["key", "kind", "text", "source", "confidence", "scope", "evidencePaths"])
+    assert.equal(continuity.parameters.properties[field], undefined);
+  assert.equal(memory.label, "Memory");
+  assert.equal(memory.executionMode, "sequential");
+  assert.match(JSON.stringify(memory.parameters), /list.*add.*replace.*remove/);
+  assert.match(memory.promptSnippet, /durable memory/i);
+  assert.match(memoryGuidance, /one pre-final durable-memory assessment/i);
+  assert.match(memoryGuidance, /if no candidate is valid, do nothing/i);
+  assert.match(memoryGuidance, /memory list when an existing key is unknown or duplicate risk/i);
+  assert.match(memoryGuidance, /named stable keys for commands and conventions/i);
+  assert.match(memoryGuidance, /Never save .*secrets/i);
 });
 
 test("completion requires response text before its tool call", async () => {
@@ -216,10 +233,17 @@ test("automatic completion waits for required verification", async () => {
   }
 });
 
-test("TUI keeps ordinary continuity updates hidden but shows terminal outcomes", () => {
-  const tool = runtime().tools.get("continuity_update");
+test("TUI keeps routine updates hidden but shows memory and terminal outcomes", () => {
+  const app = runtime();
+  const tool = app.tools.get("continuity_update");
+  const memory = app.tools.get("memory");
   const theme = { fg: (_color: string, text: string) => text };
   const render = (text: string, details?: any) => tool.renderResult(
+    { content: [{ type: "text", text }], details },
+    {},
+    theme,
+  ).render(80).map((line: string) => line.trimEnd()).join("\n");
+  const renderMemory = (text: string, details?: any) => memory.renderResult(
     { content: [{ type: "text", text }], details },
     {},
     theme,
@@ -231,6 +255,83 @@ test("TUI keeps ordinary continuity updates hidden but shows terminal outcomes",
     render("Small", { clarification: { question: "Pick scope?", answer: "Small" } }),
     "? Pick scope?\nSmall",
   );
+  assert.match(
+    renderMemory("Memory candidate add queued: project/workflow.test.", {
+      memoryCandidate: { action: "add", scope: "project", key: "workflow.test" },
+    }),
+    /Memory candidate add: project\/workflow\.test/,
+  );
+  assert.match(
+    renderMemory("memory remove requires nonempty source/reason evidence", { memoryError: true }),
+    /memory remove requires/i,
+  );
+  assert.match(
+    renderMemory("Stored facts:\n- project/workflow.test: Run tests", { memoryList: true }),
+    /project\/workflow\.test: Run tests/,
+  );
+});
+
+test("memory list is owner-safe, settles candidates, and status uses durable facts", async () => {
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const root = await mkdtemp(join(tmpdir(), "continuity-extension-memory-list-"));
+  const firstCwd = join(root, "first"), secondCwd = join(root, "second");
+  await mkdir(firstCwd); await mkdir(secondCwd);
+  await exec("git", ["init", "-q", firstCwd]);
+  await exec("git", ["init", "-q", secondCwd]);
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  const notifications: string[] = [];
+  const context = (cwd: string, sessionId: string): any => ({
+    cwd, hasUI: false, mode: "json",
+    sessionManager: { getSessionId: () => sessionId, getEntries: () => [] },
+    ui: { notify: (message: string) => notifications.push(message), setStatus: () => {}, setWidget: () => {} },
+  });
+  const first = context(firstCwd, "first"), second = context(secondCwd, "second");
+  try {
+    const app = runtime(), start = app.handlers.get("session_start")![0], settled = app.handlers.get("agent_settled")![0];
+    await start({}, first);
+    const tool = app.tools.get("memory");
+    for (const params of [
+      { action: "add", scope: "user", key: "preference.reply", text: "Use concise replies" },
+      { action: "add", key: "workflow.first", text: "Run the first command" },
+    ]) await tool.execute("candidate", params, undefined, undefined, first);
+    await settled({}, first);
+
+    await start({}, second);
+    await tool.execute("foreign", {
+      action: "add", key: "workflow.second", text: "Do not expose this project",
+    }, undefined, undefined, second);
+    await settled({}, second);
+
+    await start({}, first);
+    await tool.execute("pending", {
+      action: "add", key: "workflow.pending", text: "Pending command",
+    }, undefined, undefined, first);
+    let listed = await tool.execute("list", { action: "list" }, undefined, undefined, first);
+    assert.match(listed.content[0].text, /user\/preference\.reply: Use concise replies/);
+    assert.match(listed.content[0].text, /project\/workflow\.first: Run the first command/);
+    assert.match(listed.content[0].text, /project\/workflow\.pending \[add\]: Pending command/);
+    assert.doesNotMatch(listed.content[0].text, /workflow\.second/);
+    assert.equal(listed.details.memoryList, true);
+    await settled({}, first);
+    listed = await tool.execute("list-after-settle", { action: "list" }, undefined, undefined, first);
+    assert.doesNotMatch(listed.content[0].text, /Pending candidates:/);
+
+    await writeFile(join(firstCwd, "guide.txt"), "before\n");
+    await tool.execute("evidence", {
+      action: "add", key: "workflow.evidence", text: "Guide is current",
+      source: "guide.txt", evidencePaths: ["guide.txt"],
+    }, undefined, undefined, first);
+    await settled({}, first);
+    await writeFile(join(firstCwd, "guide.txt"), "after\n");
+    await app.handlers.get("input")![0]({ source: "user", text: "guide is current" }, first);
+    await app.handlers.get("before_agent_start")![0]({}, first);
+    await app.commands.get("memory").handler("status", first);
+    assert.match(notifications.at(-1)!, /4 current-owner stored facts, 3 visible/);
+    assert.match(notifications.at(-1)!, /0 current-owner pending candidates .*normally compacted at settlement/);
+  } finally {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+  }
 });
 
 test("circuit breaker aborts the third identical call within 30 seconds", async () => {
@@ -1021,6 +1122,31 @@ test("approval survives a clarification turn and normalizes missing plan summary
   }
 });
 
+test("plan mode permits memory list but blocks memory mutations", async () => {
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const root = await mkdtemp(join(tmpdir(), "continuity-extension-memory-plan-"));
+  const cwd = join(root, "repo");
+  await mkdir(cwd);
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  const ctx: any = {
+    cwd, hasUI: false, mode: "json", isIdle: () => true,
+    sessionManager: { getSessionId: () => "memory-plan-session", getEntries: () => [] },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  };
+  try {
+    const app = runtime();
+    for (const handler of app.handlers.get("session_start") ?? []) await handler({}, ctx);
+    await app.commands.get("plan").handler("Inspect memory", ctx);
+    assert.ok(app.active().includes("memory"));
+    const guard = app.handlers.get("tool_call")![0];
+    assert.equal(await guard({ toolName: "memory", input: { action: "list" } }, ctx), undefined);
+    assert.match((await guard({ toolName: "memory", input: { action: "add" } }, ctx)).reason, /Memory mutations are blocked.*list only/i);
+  } finally {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+  }
+});
+
 test("duplicate continuity instance does not register stale planning handlers", () => {
   const app = runtime();
   const starts = app.handlers.get("agent_start")?.length;
@@ -1060,28 +1186,26 @@ test("memory candidates survive manual and turn-end compact into model context",
       await handler({ reason: "startup" }, ctx);
     await first.commands.get("memory").handler("backups", ctx);
     assert.match(notifications.at(-1)!, /memory-v3\.reset-unsupported-/);
-    const result = await first.tools.get("continuity_update").execute(
+    const result = await first.tools.get("memory").execute(
       "call", {
-        action: "memory_candidate",
+        action: "add",
         key: "workflow.verify",
         kind: "workflow",
         text: "Run npm test before release",
         source: "project instructions",
         confidence: 1,
-        memoryAction: "add",
       }, undefined, undefined, ctx,
     );
-    assert.match(result.content[0].text, /stored/);
+    assert.match(result.content[0].text, /queued: project\/workflow\.verify/);
     await first.commands.get("memory").handler("compact", ctx);
-    await first.tools.get("continuity_update").execute(
+    await first.tools.get("memory").execute(
       "call", {
-        action: "memory_candidate",
+        action: "add",
         key: "workflow.lint",
         kind: "workflow",
         text: "Run npm run check before release",
         source: "project instructions",
         confidence: 1,
-        memoryAction: "add",
       }, undefined, undefined, ctx,
     );
     for (const handler of first.handlers.get("agent_settled") ?? [])
@@ -1101,8 +1225,8 @@ test("memory candidates survive manual and turn-end compact into model context",
     assert.match(memory.message.content, /Memory workflow\.lint: Run npm run check before release/);
     await second.commands.get("memory").handler("off", ctx);
     assert.equal(await second.handlers.get("before_agent_start")?.[0]({}, ctx), undefined);
-    await second.tools.get("continuity_update").execute(
-      "call", { action: "memory_candidate", key: "workflow.toggle", text: "Verify lint release check remains stored" },
+    await second.tools.get("memory").execute(
+      "call", { action: "add", key: "workflow.toggle", text: "Verify lint release check remains stored" },
       undefined, undefined, ctx,
     );
     await second.commands.get("memory").handler("compact", ctx);
@@ -1112,9 +1236,9 @@ test("memory candidates survive manual and turn-end compact into model context",
     assert.match(afterEnable.message.content, /workflow\.toggle/);
 
     await writeFile(join(cwd, "guide.txt"), "current\n");
-    await second.tools.get("continuity_update").execute(
+    await second.tools.get("memory").execute(
       "call", {
-        action: "memory_candidate", key: "workflow.evidence",
+        action: "add", key: "workflow.evidence",
         text: "Verify lint release check obsolete command text", source: "guide.txt",
         evidencePaths: ["guide.txt"],
       }, undefined, undefined, ctx,
@@ -1131,13 +1255,14 @@ test("memory candidates survive manual and turn-end compact into model context",
     const afterSuspectCleanup = await second.handlers.get("before_agent_start")?.[0]({}, ctx);
     assert.doesNotMatch(afterSuspectCleanup.message.content, /workflow\.evidence/);
 
-    const rejectedRemove = await second.tools.get("continuity_update").execute(
-      "call", { action: "memory_candidate", memoryAction: "remove", key: "workflow.lint" },
+    const rejectedRemove = await second.tools.get("memory").execute(
+      "call", { action: "remove", key: "workflow.lint" },
       undefined, undefined, ctx,
     );
     assert.match(rejectedRemove.content[0].text, /source\/reason/);
-    await second.tools.get("continuity_update").execute(
-      "call", { action: "memory_candidate", memoryAction: "remove", key: "workflow.lint", source: "package.json no longer defines this command" },
+    assert.equal(rejectedRemove.details.memoryError, true);
+    await second.tools.get("memory").execute(
+      "call", { action: "remove", key: "workflow.lint", source: "package.json no longer defines this command" },
       undefined, undefined, ctx,
     );
     await second.commands.get("memory").handler("compact", ctx);

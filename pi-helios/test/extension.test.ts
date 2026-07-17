@@ -62,6 +62,8 @@ test("registers native capture and constrained browser tools", () => {
   assert.deepEqual([...tools.keys()].sort(), ["helios_browser", "helios_capture"]);
   assert.match(tools.get("helios_capture").description, /Windows window/);
   assert.doesNotMatch(tools.get("helios_capture").description, /browser viewport/);
+  assert.equal(tools.get("helios_browser").parameters.anyOf, undefined);
+  assert.ok(tools.get("helios_browser").parameters.properties.actions);
 });
 
 test("visibility command changes future owned launches only", async () => {
@@ -221,6 +223,100 @@ test("browser start refuses no UI and decline invokes no CLI", async () => {
   const declined = await browser.execute("id", { action: "start", browser: "chrome" }, undefined, undefined, context({ ui: { async confirm() { return false; } } }));
   assert.equal(declined.details.declined, true);
   assert.equal(calls, 0);
+});
+
+test("browser find returns targeted refs usable by later actions", async () => {
+  const commands: string[] = [];
+  const { tools, handlers } = runtime({ exec: async (_command: string, args: string[]) => {
+    const command = args.find((value) => ["open", "find", "click", "tab-list", "close"].includes(value)) ?? "unknown";
+    commands.push(command);
+    if (command === "tab-list") return { code: 0, stdout: JSON.stringify({ result: "- 0: (current) [Shop](https://example.com/)" }), stderr: "", killed: false };
+    if (command === "find") return { code: 0, stdout: JSON.stringify({ result: 'Found 1 match for "Add to cart":\n\n- button "Add to cart" [ref=e9]' }), stderr: "", killed: false };
+    if (command === "click") return { code: 0, stdout: JSON.stringify({ snapshot: '- button "Added" [ref=e10]' }), stderr: "", killed: false };
+    return { code: 0, stdout: "{}", stderr: "", killed: false };
+  } });
+  const browser = tools.get("helios_browser");
+  const ctx = context();
+  await browser.execute("start", { action: "start", url: "https://example.com" }, undefined, undefined, ctx);
+  const found = await browser.execute("find", { action: "find", text: "Add to cart" }, undefined, undefined, ctx);
+  assert.match(found.content[0].text, /Found 1 match/);
+  assert.match(found.content[0].text, /ref=e9/);
+  await browser.execute("click", { action: "click", target: "e9" }, undefined, undefined, ctx);
+  await assert.rejects(browser.execute("invalid", { action: "find", text: "cart", regex: "cart" }, undefined, undefined, ctx), /exactly one/);
+  assert.ok(commands.includes("find"));
+  assert.ok(commands.includes("click"));
+  for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
+});
+
+test("browser batch runs ordered steps and returns labeled aggregate details", async () => {
+  const commands: string[] = [];
+  const { tools } = runtime({ exec: async (_command: string, args: string[]) => {
+    const command = args.find((value) => ["open", "goto", "tab-list", "close"].includes(value)) ?? "unknown";
+    commands.push(command);
+    if (command === "tab-list") return { code: 0, stdout: JSON.stringify({ result: "- 0: (current) [Example](https://example.com/)" }), stderr: "", killed: false };
+    return { code: 0, stdout: "{}", stderr: "", killed: false };
+  } });
+  const result = await tools.get("helios_browser").execute("batch", {
+    actions: [
+      { action: "start", url: "https://example.com" },
+      { action: "navigate", url: "https://example.com/next" },
+      { action: "close" },
+    ],
+  }, undefined, undefined, context());
+  assert.deepEqual(commands, ["open", "tab-list", "goto", "tab-list", "close"]);
+  assert.deepEqual(result.details.steps.map((step: any) => step.action), ["start", "navigate", "close"]);
+  assert.deepEqual(result.details.steps.map((step: any) => step.details.action), ["start", "navigate", "close"]);
+  assert.equal(result.details.completed, 3);
+  assert.match(result.content[0].text, /^Step 1 \(start\):/);
+  assert.match(result.content[1].text, /^Step 2 \(navigate\):/);
+});
+
+test("browser single-action result remains unwrapped", async () => {
+  const { tools, handlers } = runtime({ exec: async (_command: string, args: string[]) => {
+    const command = args.find((value) => ["open", "tab-list", "close"].includes(value));
+    if (command === "tab-list") return { code: 0, stdout: JSON.stringify({ result: "- 0: (current) [Example](https://example.com/)" }), stderr: "", killed: false };
+    return { code: 0, stdout: "{}", stderr: "", killed: false };
+  } });
+  const ctx = context();
+  const result = await tools.get("helios_browser").execute("start", { action: "start" }, undefined, undefined, ctx);
+  assert.equal(result.details.action, "start");
+  assert.equal(result.details.steps, undefined);
+  assert.match(result.content[0].text, /^Browser start completed/);
+  for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
+});
+
+test("browser batch rejects mixed input and stops after declined consent", async () => {
+  let calls = 0;
+  const { tools } = runtime({ exec: async () => { calls++; return successfulLookup(); } });
+  const browser = tools.get("helios_browser");
+  await assert.rejects(browser.execute("missing", {}, undefined, undefined, context()), /requires action or actions/);
+  await assert.rejects(browser.execute("mixed", { action: "start", actions: [{ action: "start" }] }, undefined, undefined, context()), /only actions/);
+  const declined = await browser.execute("declined", {
+    actions: [{ action: "start" }, { action: "navigate", url: "https://example.com" }],
+  }, undefined, undefined, context({ ui: { async confirm() { return false; } } }));
+  assert.equal(declined.details.steps.length, 1);
+  assert.equal(declined.details.steps[0].details.declined, true);
+  assert.equal(declined.details.completed, 1);
+  assert.equal(declined.details.stoppedAt, 1);
+  assert.equal(declined.details.reason, "declined");
+  assert.equal(calls, 0);
+});
+
+test("browser batch stops after a failed step", async () => {
+  const commands: string[] = [];
+  const { tools, handlers } = runtime({ exec: async (_command: string, args: string[]) => {
+    const command = args.find((value) => ["open", "goto", "tab-list", "close"].includes(value)) ?? "unknown";
+    commands.push(command);
+    if (command === "tab-list") return { code: 0, stdout: JSON.stringify({ result: "- 0: (current) [Example](https://example.com/)" }), stderr: "", killed: false };
+    if (command === "goto") return { code: 1, stdout: "", stderr: "failed", killed: false };
+    return { code: 0, stdout: "{}", stderr: "", killed: false };
+  } });
+  const ctx = context();
+  await assert.rejects(tools.get("helios_browser").execute("failed", {
+    actions: [{ action: "start" }, { action: "navigate", url: "https://example.com" }, { action: "close" }],
+  }, undefined, undefined, ctx), /batch step 2 \(navigate\) failed:.*command failed/i);
+  assert.deepEqual(commands, ["open", "tab-list", "goto"]);
+  for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
 });
 
 test("attached endpoint validation happens before consent and remains loopback", async () => {

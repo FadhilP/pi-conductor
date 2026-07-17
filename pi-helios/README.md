@@ -37,9 +37,26 @@ chrome --remote-debugging-port=9222 --user-data-dir=C:\temp\pi-helios-cdp
 
 - `start`, `attach`, `close`, `detach`
 - `navigate`, `back`, `forward`, `reload`
-- `snapshot`, `screenshot`
+- `snapshot`, `find`, `screenshot`
 - `click`, `fill`, `press`, `hover`, `select`, `check`, `uncheck`
 - `tabs` with `list`, `select`, `create`, or `close`
+
+Ordered actions can be sent in one batch (up to 20 steps):
+
+```text
+{ actions: [{ action: "start", url: "https://example.com" }, { action: "snapshot" }, { action: "close" }] }
+```
+
+Batch only steps whose targets and element references are already known. If a later action depends on inspecting an earlier snapshot or result, make a separate call instead.
+
+Prefer targeted search over a full snapshot when the element text is known:
+
+```text
+{ action: "find", text: "Add to cart" }
+{ action: "find", regex: "/sign (in|up)/i" }
+```
+
+`find` accepts exactly one plain-text or regular-expression query, searches the current accessibility snapshot, and returns matching nodes with nearby context and usable refs. Queries are limited to 500 characters.
 
 Use element references from latest snapshot, such as `e12`; arbitrary selectors are rejected. URLs permit HTTP(S) and `about:blank`, not credentials or local files. Snapshot depth, text, output, errors, tabs, and screenshots are bounded. Screenshots remain limited to valid PNG files up to 25 MB.
 

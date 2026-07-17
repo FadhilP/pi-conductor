@@ -1,6 +1,6 @@
 {
   "name": "pylon",
-  "version": "0.10.9",
+  "version": "0.11.0",
   "private": true,
   "description": "Complete Pi Conductor package with all extensions and themes.",
   "type": "module",

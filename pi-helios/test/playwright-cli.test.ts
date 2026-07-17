@@ -26,6 +26,25 @@ test("adapter invokes pinned CLI with argument array and private cwd", async () 
   } finally { await cli.dispose(); }
 });
 
+test("find uses bounded CLI snapshot search output", async () => {
+  const calls: string[][] = [];
+  const found = 'Found 1 match for "Add to cart":\n\n- button "Add to cart" [ref=e9]';
+  const cli = await PlaywrightCli.create(async (_command, args) => {
+    calls.push(args);
+    return { code: 0, stdout: JSON.stringify({ result: found }), stderr: "", killed: false };
+  });
+  try {
+    const text = await cli.run(SESSION, { kind: "find", text: "Add to cart" });
+    const regex = await cli.run(SESSION, { kind: "find", regex: "/add to cart/i" });
+    assert.deepEqual(calls[0].slice(1), ["--json", `-s=${SESSION}`, "find", "Add to cart"]);
+    assert.deepEqual(calls[1].slice(1), ["--json", `-s=${SESSION}`, "find", "--regex", "/add to cart/i"]);
+    assert.equal(text.snapshot, found);
+    assert.equal(regex.snapshot, found);
+    await assert.rejects(cli.run(SESSION, { kind: "find" }), /exactly one/);
+    await assert.rejects(cli.run(SESSION, { kind: "find", text: "x", regex: "x" }), /exactly one/);
+  } finally { await cli.dispose(); }
+});
+
 test("link URL lookup uses fixed trusted expression and snapshot reference", async () => {
   let args: string[] = [];
   const cli = await PlaywrightCli.create(async (_command, value) => {
