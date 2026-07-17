@@ -21,6 +21,7 @@ export type BrowserAction =
   | { kind: "navigate"; url: string }
   | { kind: "link-url"; target: string }
   | { kind: "snapshot"; target?: string; depth?: number }
+  | { kind: "find"; text?: string; regex?: string }
   | { kind: "screenshot"; target?: string; fullPage?: boolean }
   | { kind: "click" | "hover" | "check" | "uncheck"; target: string }
   | { kind: "fill"; target: string; text: string }
@@ -211,7 +212,13 @@ export class PlaywrightCli {
     if (signal?.aborted) throw new HeliosCliError("cancelled", "Browser action cancelled");
     const value = parseJson(result, this.directory, sessionName);
     const nested = value.result && typeof value.result === "object" ? value.result as Record<string, unknown> : undefined;
-    const rawSnapshot = typeof value.snapshot === "string" ? value.snapshot : typeof nested?.snapshot === "string" ? nested.snapshot : undefined;
+    const rawSnapshot = typeof value.snapshot === "string"
+      ? value.snapshot
+      : typeof nested?.snapshot === "string"
+        ? nested.snapshot
+        : action.kind === "find" && typeof value.result === "string"
+          ? value.result
+          : undefined;
     delete value.snapshot;
     if (nested) delete nested.snapshot;
     if (artifactPath) {
@@ -254,6 +261,12 @@ export class PlaywrightCli {
       case "snapshot": {
         if (action.depth !== undefined && (!Number.isInteger(action.depth) || action.depth < 1 || action.depth > 20)) throw new Error("Snapshot depth must be an integer from 1 to 20");
         return { command: "snapshot", args: [...(action.target ? [target(action.target)] : []), ...(action.depth ? [`--depth=${action.depth}`] : [])], timeout: normal };
+      }
+      case "find": {
+        if (Boolean(action.text) === Boolean(action.regex)) throw new Error("Browser find requires exactly one of text or regex");
+        const query = action.text ?? action.regex!;
+        if (query.length > 500) throw new Error("Browser find query exceeds 500 characters");
+        return { command: "find", args: action.regex ? ["--regex", query] : [query], timeout: normal };
       }
       case "screenshot": {
         const artifactPath = join(this.directory, "artifacts", `screenshot-${Date.now()}-${crypto.randomUUID()}.png`);

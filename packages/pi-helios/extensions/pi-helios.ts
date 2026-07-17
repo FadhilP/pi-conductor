@@ -15,23 +15,31 @@ const captureSchema = Type.Object({
   title: Type.String({ description: "Required Windows window-title substring", maxLength: 500 }),
 });
 
-const browserSchema = Type.Object({
-  action: StringEnum(["start", "attach", "navigate", "snapshot", "screenshot", "click", "fill", "press", "hover", "select", "check", "uncheck", "back", "forward", "reload", "tabs", "detach", "close"] as const),
+const BROWSER_ACTIONS = ["start", "attach", "navigate", "snapshot", "find", "screenshot", "click", "fill", "press", "hover", "select", "check", "uncheck", "back", "forward", "reload", "tabs", "detach", "close"] as const;
+const browserActionFields = {
   url: Type.Optional(Type.String({ maxLength: 4096 })),
   attachMode: Type.Optional(StringEnum(["cdp", "extension"] as const)),
   endpoint: Type.Optional(Type.String({ maxLength: 2048 })),
   browser: Type.Optional(StringEnum(["chrome", "msedge"] as const, { description: "Browser for extension attachment; ignored by start" })),
   target: Type.Optional(Type.String({ maxLength: 32, description: "Element reference from latest snapshot, such as e12" })),
   text: Type.Optional(Type.String({ maxLength: 10000 })),
+  regex: Type.Optional(Type.String({ maxLength: 500 })),
   key: Type.Optional(Type.String({ maxLength: 64 })),
   value: Type.Optional(Type.String({ maxLength: 1000 })),
   depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
   fullPage: Type.Optional(Type.Boolean()),
   tabAction: Type.Optional(StringEnum(["list", "select", "create", "close"] as const)),
   tabIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
-});
+};
+const browserActionSchema = Type.Object({ action: StringEnum(BROWSER_ACTIONS), ...browserActionFields }, { additionalProperties: false });
+const browserSchema = Type.Object({
+  action: Type.Optional(StringEnum(BROWSER_ACTIONS)),
+  ...browserActionFields,
+  actions: Type.Optional(Type.Array(browserActionSchema, { minItems: 1, maxItems: 20, description: "Ordered browser actions; each step completes before the next starts" })),
+}, { additionalProperties: false });
 
-type BrowserParams = Static<typeof browserSchema>;
+type BrowserParams = Static<typeof browserActionSchema>;
+type BrowserInput = Static<typeof browserSchema>;
 
 function sessionId(ctx: any): string {
   const id = ctx.sessionManager?.getSessionId?.();
@@ -56,6 +64,11 @@ function browserAction(params: BrowserParams): BrowserAction {
   switch (params.action) {
     case "navigate": rejectExtra(params, ["url"]); return { kind: "navigate", url: requireField(params, "url") };
     case "snapshot": rejectExtra(params, ["target", "depth"]); return { kind: "snapshot", target: params.target, depth: params.depth };
+    case "find": {
+      rejectExtra(params, ["text", "regex"]);
+      if (Boolean(params.text) === Boolean(params.regex)) throw new Error("find requires exactly one of text or regex");
+      return { kind: "find", text: params.text, regex: params.regex };
+    }
     case "screenshot":
       rejectExtra(params, ["target", "fullPage"]);
       if (params.target && params.fullPage) throw new Error("Element screenshot and full-page screenshot cannot be combined");
@@ -222,17 +235,20 @@ export default function heliosExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "helios_browser",
     label: "Helios Browser",
-    description: "Use one consented browser session for constrained navigation, page snapshots, element-reference interaction, screenshots, and tabs. Results are bounded; no raw Playwright commands, scripts, storage, network interception, uploads, or downloads.",
+    description: "Use one consented browser session for constrained navigation, targeted snapshot search, page snapshots, element-reference interaction, screenshots, and tabs. Results are bounded; no raw Playwright commands, scripts, storage, network interception, uploads, or downloads.",
     promptSnippet: "Use one consented browser session through constrained Playwright actions",
     promptGuidelines: [
       "Use helios_browser only for user-requested browser work; call start or attach first, then close or detach when done.",
       "Use helios_browser snapshot element references for page actions; never guess selectors.",
+      "Prefer helios_browser find over a full snapshot when text or a regular expression can locate the needed element; find returns matching snapshot nodes with bounded context.",
+      "Batch predetermined, non-consequential actions when their targets and element references are already clear. Do not batch when the next target or action depends on inspecting an earlier snapshot or result; make a separate call instead.",
       "Do not use helios_browser for monitoring. User must supervise purchases, messages, publishing, destructive actions, or other consequential clicks.",
     ],
     parameters: browserSchema,
     executionMode: "sequential",
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const id = sessionId(ctx);
+    async execute(toolCallId, params: BrowserInput, signal, onUpdate, ctx) {
+      const executeAction = async (params: BrowserParams) => {
+        const id = sessionId(ctx);
       if (params.action === "start") {
         rejectExtra(params, ["url", "browser"]);
         if (!ctx.hasUI) throw new Error("Helios browser control requires interactive confirmation");
@@ -286,6 +302,34 @@ export default function heliosExtension(pi: ExtensionAPI) {
           if (ctx.hasUI) ctx.ui.notify("Helios could not delete temporary browser screenshot.", "warning");
         });
       }
+      };
+
+      if (params.actions === undefined) {
+        if (params.action === undefined) throw new Error("helios_browser requires action or actions");
+        return executeAction(params as BrowserParams);
+      }
+      if (Object.entries(params).some(([key, value]) => key !== "actions" && value !== undefined)) {
+        throw new Error("Browser batch must contain only actions");
+      }
+      const content: any[] = [];
+      const steps: Array<{ action: string; details: unknown }> = [];
+      for (const [index, action] of params.actions.entries()) {
+        let result;
+        try {
+          result = await executeAction(action);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`Browser batch step ${index + 1} (${action.action}) failed: ${message}`, { cause: error });
+        }
+        steps.push({ action: action.action, details: result.details });
+        for (const item of result.content) {
+          content.push(item.type === "text" ? { ...item, text: `Step ${index + 1} (${action.action}):\n${item.text}` } : item);
+        }
+        if ((result.details as { declined?: boolean }).declined) {
+          return { content, details: { steps, completed: steps.length, stoppedAt: index + 1, reason: "declined" } };
+        }
+      }
+      return { content, details: { steps, completed: steps.length } };
     },
   });
 }

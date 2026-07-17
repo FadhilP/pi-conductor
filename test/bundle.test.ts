@@ -99,7 +99,7 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
       "advisor", "continuity", "grunt", "guard", "heartbeat", "helios-doctor", "helios-visibility", "memory", "plan", "pylon", "scout", "timeline", "todos", "ui",
     ]);
     assert.deepEqual([...tools.keys()].sort(), [
-      "advisor", "continuity_update", "fd", "grunt", "heartbeat_cancel", "heartbeat_start", "heartbeat_status", "helios_browser", "helios_capture", "repo_scout", "rg", "verify", "web_scout",
+      "advisor", "continuity_update", "fd", "grunt", "heartbeat_cancel", "heartbeat_start", "heartbeat_status", "helios_browser", "helios_capture", "memory", "repo_scout", "rg", "verify", "web_scout",
     ]);
     assert.ok(renderers.has("pi-scout-session"));
 
@@ -115,6 +115,7 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
     };
     for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
     assert.ok(active.includes("continuity_update"));
+    assert.ok(active.includes("memory"));
     assert.ok(!active.includes("grunt"));
     assert.ok(!active.includes("repo_scout"));
     assert.ok(!active.includes("web_scout"));

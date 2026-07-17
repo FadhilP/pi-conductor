@@ -92,9 +92,8 @@ const Kind = StringEnum([
     "set_plan",
     "todo",
     "state",
-    "memory_candidate",
   ] as const),
-  MemAction = StringEnum(["add", "replace", "remove"] as const),
+  MemAction = StringEnum(["list", "add", "replace", "remove"] as const),
   ScopeName = StringEnum(["user", "project"] as const);
 export default function continuityExtension(pi: ExtensionAPI) {
   let duplicate = false;
@@ -217,6 +216,11 @@ export default function continuityExtension(pi: ExtensionAPI) {
   };
   const ownerFor = (scope: Scope) =>
     scope === "user" ? "default" : project?.owner;
+  const candidatesForOwners = (items: PendingCandidate[], projectOwner: string) =>
+    items.filter((item) =>
+      (item.scope === "user" && item.owner === "default") ||
+      (item.scope === "project" && item.owner === projectOwner),
+    );
   const resolveProject = async (cwd: string) => {
     const resolved = await projectContext(cwd, workspace?.projectOwner ?? project?.owner ?? workspace!.id);
     project = resolved;
@@ -308,9 +312,7 @@ export default function continuityExtension(pi: ExtensionAPI) {
       candidates = latestCandidates;
       if (!candidates.length) return;
       project = await resolveProject(currentCwd);
-      const currentCandidates = candidates.filter((item) =>
-        item.scope === "user" && item.owner === "default" ||
-        item.scope === "project" && item.owner === project!.owner);
+      const currentCandidates = candidatesForOwners(candidates, project!.owner);
       if (!currentCandidates.length) return;
       // Never compact or inspect another owner's project against the current repository.
       const provisional = compact(memoryFacts, currentCandidates, Number.MAX_SAFE_INTEGER).facts;
@@ -342,10 +344,14 @@ export default function continuityExtension(pi: ExtensionAPI) {
       version: 1,
       kind: "register",
       owner: "pi-continuity",
-      managedTools: ["continuity_update"],
-      enabledTools: ["continuity_update"],
+      managedTools: ["continuity_update", "memory"],
+      enabledTools: ["continuity_update", "memory"],
       ...(on ? { allowOnly: planningTools() } : {}),
-      ...(!on && savedTools ? { restoreTools: savedTools } : {}),
+      ...(!on && savedTools ? { restoreTools: [...new Set([
+        ...savedTools,
+        "continuity_update",
+        "memory",
+      ])] } : {}),
       acknowledge: () => { coordinated = true; },
     });
     if (coordinated) {
@@ -354,12 +360,17 @@ export default function continuityExtension(pi: ExtensionAPI) {
     }
     if (on) {
       const allowed = new Set(planningTools());
-      pi.setActiveTools(pi.getActiveTools().filter((tool) => allowed.has(tool)));
+      pi.setActiveTools([...new Set([
+        ...pi.getActiveTools().filter((tool) => allowed.has(tool)),
+        "continuity_update",
+        "memory",
+      ])]);
     } else if (savedTools) {
       pi.setActiveTools([...new Set([
         ...pi.getActiveTools(),
         ...savedTools,
         "continuity_update",
+        "memory",
       ])]);
       savedTools = undefined;
     }
@@ -541,6 +552,11 @@ export default function continuityExtension(pi: ExtensionAPI) {
         reason: "Plan mode is read-only. Approve or cancel plan first.",
       };
     const input = (event.input ?? {}) as { action?: string; completion?: boolean };
+    if (work?.mode === "planning" && event.toolName === "memory" && input.action !== "list")
+      return {
+        block: true,
+        reason: "Plan mode is read-only. Memory mutations are blocked; use memory list only.",
+      };
     if (
       event.toolName === "continuity_update" &&
       input.action === "state" &&
@@ -615,21 +631,126 @@ export default function continuityExtension(pi: ExtensionAPI) {
       };
   });
   pi.registerTool({
-    name: "continuity_update",
-    label: "Continuity Update",
-    description:
-      "Update plan, todos, state, clarification, or durable-memory candidate.",
+    name: "memory",
+    label: "Memory",
+    description: "List durable memory or queue an add, replace, or remove candidate.",
+    promptSnippet: "Inspect or propose durable memory candidates.",
     executionMode: "sequential",
     promptGuidelines: [
-      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list, starts its first todo, and does not activate the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. Clarification questions must ask one concrete decision in plain language, explain why the answer matters in one short sentence when needed, and avoid vague prompts such as 'What do you prefer?'. Use short distinct option labels; descriptions state the practical outcome or tradeoff. Put the recommended option first and say why in its description. Do not ask questions answerable from repository evidence or safe defaults. During explicit planning, Continuity owns plan presentation: populate goal, planSummary as the approach, constraints, and ordered todos; do not invent a separate plan format. Outside explicit planning, set_plan creates an internal execution task list only; do not present it to the user as a structured plan. When planning used Scout, put compact actionable anchors in planSummary: relevant paths, symbols, line ranges, assumptions, and unresolved gaps; do not copy the raw Scout report. During execution, use clarify only for a new blocking user decision that cannot be safely inferred, only as the sole tool call at a safe checkpoint; prefer asking before mutation, stabilize any atomic operation first, and never re-ask an answered question without new evidence. During execution, use exact todo IDs from Continuity context. Complete current work and start the next todo atomically by passing nextTodoId with status done; omit nextTodoId for the final todo. Mark mutation work done immediately after verification. Skip Verify for read-only work. Run Verify and all nonterminal continuity updates in tool-only assistant turns before the final response. Once every todo is done and verification has passed when required, write the final user-facing response with no tool calls; Continuity completes automatically. Do not call tools after final text. Keep completion true for explicit allowUnverified fallback or compatibility only; it still requires preceding response text. Record concise failures/next action. Propose memory only when all three hold: evidence supports it (user instruction, verified repository/tool evidence, or repeated observation); it is likely true and useful in future sessions; it changes a future decision or avoids repeated work. Include evidence in source. Good candidates include user preferences, validated commands, project conventions, canonical paths, architecture boundaries, recurring warnings, and durable tool limitations. Never save task progress, guesses, one-time errors, temporary file state, generic facts, duplicates, or secrets. With direct user or current repository evidence, replace a fact when it remains true or a newer truth is known, and remove it when contradicted; otherwise leave suspect facts alone. Supply evidencePaths when repository files support a project-memory mutation. Reuse stable keys; add and replace both set one fact per key. Remove requires the exact key and a nonempty source/reason. Use user scope only for durable cross-project preferences; use project scope for everything project-specific.",
+      "Make one pre-final durable-memory assessment; this does not require creating a candidate, and if no candidate is valid, do nothing. Use memory add, replace, or remove only when all three hold: evidence supports it (user instruction, verified repository/tool evidence, or repeated observation); it is likely true and useful in future sessions; it changes a future decision or avoids repeated work. Use memory list when an existing key is unknown or duplicate risk exists. Prefer named stable keys for commands and conventions; reuse stable keys, and add and replace both set one fact per key. Include evidence in source. Good candidates include user preferences, validated commands, project conventions, canonical paths, architecture boundaries, recurring warnings, and durable tool limitations. Never save task progress, guesses, one-time errors, temporary file state, generic facts, duplicates, or secrets. With direct user or current repository evidence, replace a fact when it remains true or a newer truth is known, and remove it when contradicted; otherwise leave suspect facts alone. Supply evidencePaths when repository files support a project-memory mutation. Remove requires the exact key and a nonempty source/reason. Use user scope only for durable cross-project preferences; use project scope for everything project-specific.",
     ],
     renderShell: "self",
     renderCall: () => new Container(),
     renderResult: (result, _options, theme) => {
       const item = result.content.find((content) => content.type === "text");
       const text = item?.type === "text" ? item.text : undefined;
-      const clarification = (result.details as any)?.clarification;
-      const plan = (result.details as any)?.plan;
+      const details = result.details as any;
+      if (details?.memoryError)
+        return new Text(theme.fg("warning", `⚠ ${text ?? "Invalid memory candidate."}`), 0, 0);
+      if (details?.memoryCandidate) {
+        const memory = details.memoryCandidate as PendingCandidate;
+        return new Text(
+          theme.fg("success", `✓ Memory candidate ${memory.action}: ${memory.scope}/${memory.key}`),
+          0,
+          0,
+        );
+      }
+      if (details?.memoryList)
+        return new Text(text ?? "No current-owner memory facts or pending candidates.", 0, 0);
+      return new Container();
+    },
+    parameters: Type.Object({
+      action: MemAction,
+      key: Type.Optional(Type.String({ maxLength: 200 })),
+      kind: Type.Optional(Kind),
+      text: Type.Optional(Type.String({ maxLength: 1000 })),
+      source: Type.Optional(Type.String({ maxLength: 500 })),
+      confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+      scope: Type.Optional(ScopeName),
+      evidencePaths: Type.Optional(Type.Array(Type.String({ maxLength: 240 }), { maxItems: 5 })),
+    }, { additionalProperties: false }),
+    async execute(_i, p, _s, _u, ctx): Promise<any> {
+      if (p.action === "list") {
+        project = await resolveProject(ctx.cwd);
+        // Read without a lock: this action never mutates state and storage writes are atomic.
+        memoryFacts = (await readMemory()).facts;
+        candidates = (await readCandidateQueue()).candidates;
+        const owned = factsForOwners(memoryFacts, project.owner);
+        const pending = candidatesForOwners(candidates, project.owner), shownPending = pending.slice(0, 30);
+        const concise = (text: string) => text.length > 200 ? `${text.slice(0, 197)}...` : text;
+        const text = !owned.length && !pending.length
+          ? "No current-owner memory facts or pending candidates."
+          : [
+            ...(owned.length ? [
+              "Stored facts:",
+              ...owned.map((fact) => `- ${fact.scope}/${fact.key}: ${concise(fact.text)}`),
+            ] : []),
+            ...(pending.length ? [
+              "Pending candidates:",
+              ...shownPending.map((item) => `- ${item.scope}/${item.key} [${item.action}]: ${concise(item.text ?? item.source)}`),
+              ...(pending.length > shownPending.length ? [`- ${pending.length - shownPending.length} more pending candidates omitted.`] : []),
+            ] : []),
+          ].join("\n");
+        return { content: [{ type: "text", text }], details: { memoryList: true } };
+      }
+      const requestedScope = (p.scope ?? "project") as Scope;
+      if (requestedScope === "project") project = await resolveProject(ctx.cwd);
+      const owner = ownerFor(requestedScope)!;
+      try {
+        if (requestedScope === "user" && p.evidencePaths?.length)
+          throw Error("user memory cannot capture project evidence");
+        const evidence = requestedScope === "project" && p.evidencePaths?.length
+          ? await captureEvidence(ctx.cwd, p.evidencePaths) : undefined;
+        const next = candidate({
+          key: p.key, kind: p.kind, text: p.text, source: p.source,
+          confidence: p.confidence, action: p.action, scope: requestedScope,
+        }, {
+          scope: requestedScope,
+          owner,
+          // Callers cannot supply hashes, ownership, or Git provenance.
+          ...(requestedScope === "project" ? project : {}),
+          ...(evidence?.length ? { evidencePaths: evidence } : {}),
+        });
+        candidates = await withStateLock(memoryDirectory(), async () => (
+          await updateJson(
+            paths().candidates,
+            { schemaVersion: MEMORY_SCHEMA_VERSION, candidates: [] as PendingCandidate[] },
+            (file) => ({
+              schemaVersion: MEMORY_SCHEMA_VERSION,
+              candidates: [...normalizeCandidatesFile(file)!.candidates, next],
+            }),
+            validCandidatesFile,
+          )
+        ).candidates);
+        return {
+          content: [{ type: "text", text: `Memory candidate ${next.action} queued: ${next.scope}/${next.key}.` }],
+          details: { memoryCandidate: next },
+        };
+      } catch (error: any) {
+        return {
+          content: [{ type: "text", text: error?.message ?? "Invalid memory candidate." }],
+          details: { memoryError: true },
+        };
+      }
+    },
+  });
+  pi.registerTool({
+    name: "continuity_update",
+    label: "Continuity Update",
+    description: "Update plan, todos, state, or clarification.",
+    promptSnippet: "Planning, todo/state tracking, and clarification capability.",
+    executionMode: "sequential",
+    promptGuidelines: [
+      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list, starts its first todo, and does not activate the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. Clarification questions must ask one concrete decision in plain language, explain why the answer matters in one short sentence when needed, and avoid vague prompts such as 'What do you prefer?'. Use short distinct option labels; descriptions state the practical outcome or tradeoff. Put the recommended option first and say why in its description. Do not ask questions answerable from repository evidence or safe defaults. During explicit planning, Continuity owns plan presentation: populate goal, planSummary as the approach, constraints, and ordered todos; do not invent a separate plan format. Outside explicit planning, set_plan creates an internal execution task list only; do not present it to the user as a structured plan. When planning used Scout, put compact actionable anchors in planSummary: relevant paths, symbols, line ranges, assumptions, and unresolved gaps; do not copy the raw Scout report. During execution, use clarify only for a new blocking user decision that cannot be safely inferred, only as the sole tool call at a safe checkpoint; prefer asking before mutation, stabilize any atomic operation first, and never re-ask an answered question without new evidence. During execution, use exact todo IDs from Continuity context. Complete current work and start the next todo atomically by passing nextTodoId with status done; omit nextTodoId for the final todo. Mark mutation work done immediately after verification. Skip Verify for read-only work. Run Verify and all nonterminal continuity updates in tool-only assistant turns before the final response. Once every todo is done and verification has passed when required, write the final user-facing response with no tool calls; Continuity completes automatically. Do not call tools after final text. Keep completion true for explicit allowUnverified fallback or compatibility only; it still requires preceding response text. Record concise failures/next action.",
+    ],
+    renderShell: "self",
+    renderCall: () => new Container(),
+    renderResult: (result, _options, theme) => {
+      const item = result.content.find((content) => content.type === "text");
+      const text = item?.type === "text" ? item.text : undefined;
+      const details = result.details as any;
+      const clarification = details?.clarification;
+      const plan = details?.plan;
       if (clarification)
         return new Text(
           `${theme.fg("muted", `? ${clarification.question}`)}\n${theme.fg("accent", clarification.answer)}`,
@@ -689,14 +810,6 @@ export default function continuityExtension(pi: ExtensionAPI) {
         latestFailure: Type.Optional(Type.String({ maxLength: 1000 })),
         nextAction: Type.Optional(Type.String({ maxLength: 1000 })),        completion: Type.Optional(Type.Boolean()),
         allowUnverified: Type.Optional(Type.Boolean({ description: "Explicitly allow completion only when Verify reports clean or no declared checks." })),
-        key: Type.Optional(Type.String({ maxLength: 200 })),
-        kind: Type.Optional(Kind),
-        text: Type.Optional(Type.String({ maxLength: 1000 })),
-        source: Type.Optional(Type.String({ maxLength: 500 })),
-        confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
-        memoryAction: Type.Optional(MemAction),
-        scope: Type.Optional(ScopeName),
-        evidencePaths: Type.Optional(Type.Array(Type.String({ maxLength: 240 }), { maxItems: 5 })),
       },
       { additionalProperties: false },
     ),
@@ -819,41 +932,6 @@ export default function continuityExtension(pi: ExtensionAPI) {
           ],
           ...(planning ? { details: { plan: formatPlan(work) } } : {}),
         };
-      }
-      if (p.action === "memory_candidate") {
-        const requestedScope = (p.scope ?? "project") as Scope;
-        if (requestedScope === "project") project = await resolveProject(ctx.cwd);
-        const owner = ownerFor(requestedScope)!;
-        try {
-          if (requestedScope === "user" && p.evidencePaths?.length)
-            throw Error("user memory cannot capture project evidence");
-          const evidence = requestedScope === "project" && p.evidencePaths?.length
-            ? await captureEvidence(ctx.cwd, p.evidencePaths) : undefined;
-          const next = candidate({
-            key: p.key, kind: p.kind, text: p.text, source: p.source,
-            confidence: p.confidence, action: p.memoryAction, scope: requestedScope,
-          }, {
-            scope: requestedScope,
-            owner,
-            // Callers cannot supply hashes, ownership, or Git provenance.
-            ...(requestedScope === "project" ? project : {}),
-            ...(evidence?.length ? { evidencePaths: evidence } : {}),
-          });
-          candidates = await withStateLock(memoryDirectory(), async () => (
-            await updateJson(
-              paths().candidates,
-              { schemaVersion: MEMORY_SCHEMA_VERSION, candidates: [] as PendingCandidate[] },
-              (file) => ({
-                schemaVersion: MEMORY_SCHEMA_VERSION,
-                candidates: [...normalizeCandidatesFile(file)!.candidates, next],
-              }),
-              validCandidatesFile,
-            )
-          ).candidates);
-        } catch (error: any) {
-          return { content: [{ type: "text", text: error?.message ?? "Invalid memory candidate." }] };
-        }
-        return { content: [{ type: "text", text: "Memory candidate stored." }] };
       }
       if (!work)
         return { content: [{ type: "text", text: "No active work." }] };
@@ -1272,9 +1350,10 @@ export default function continuityExtension(pi: ExtensionAPI) {
             .filter((name) => name.includes(".reset-unsupported-")).map((name) => join(dir, name));
         ctx.ui.notify([...shared, ...local].join("\n") || "No memory reset backups.", "info");
       } else if (sub === "compact") {
+        project = await resolveProject(ctx.cwd);
         await compactMemory();
         ctx.ui.notify(
-          `Applied memory candidates. ${facts.length} facts.`,
+          `Applied memory candidates. ${factsForOwners(memoryFacts, project.owner).length} current-owner facts.`,
           "info",
         );
       } else if (sub === "show") {
@@ -1351,11 +1430,24 @@ export default function continuityExtension(pi: ExtensionAPI) {
         });
         facts = memoryFacts;
         ctx.ui.notify(removed ? `Forgot memory ${scope}/${key}.` : `Memory ${scope}/${key} not found.`, "info");
-      } else
+      } else {
+        // `facts` is a transient injection shortlist; status must reload durable state.
+        project = await resolveProject(ctx.cwd);
+        memoryFacts = (await readMemory()).facts;
+        candidates = (await readCandidateQueue()).candidates;
+        const owned = factsForOwners(memoryFacts, project.owner);
+        const projectFacts = owned.filter((fact) => fact.scope === "project");
+        const statuses = await classifyProjectFacts(ctx.cwd, projectFacts);
+        const active = statuses.filter((item) => item.status === "active").length;
+        const unchecked = owned.filter((fact) => fact.scope === "user").length +
+          statuses.filter((item) => item.status === "unchecked").length;
+        const visible = active + unchecked;
+        const pending = candidatesForOwners(candidates, project.owner).length;
         ctx.ui.notify(
-          `Injection ${memoryInjectionEnabled ? "on" : "off"}; ${facts.length} facts, ${candidates.length} pending candidates.`,
+          `Injection ${memoryInjectionEnabled ? "on" : "off"}; ${owned.length} current-owner stored facts, ${visible} visible (active/unchecked: ${active}/${unchecked}), ${pending} current-owner pending candidate${pending === 1 ? "" : "s"} (normally compacted at settlement).`,
           "info",
         );
+      }
     },
   });
 }
