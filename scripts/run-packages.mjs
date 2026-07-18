@@ -14,6 +14,7 @@ const packages = [
   "pi-heartbeat",
   "pi-helios",
   "pi-scout",
+  "pi-sieve",
   "pi-timeline",
   "pi-verify",
 ];

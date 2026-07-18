@@ -1,6 +1,6 @@
 {
   "name": "pylon",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "description": "Complete Pylon package with all extensions and themes.",
   "type": "module",
@@ -28,6 +28,7 @@
       "./packages/pi-helios/extensions/pi-helios.ts",
       "./packages/pi-scout/extensions/search-tools.ts",
       "./packages/pi-scout/extensions/pi-scout.ts",
+      "./packages/pi-sieve/extensions/pi-sieve.ts",
       "./packages/pi-timeline/extensions/pi-timeline.ts",
       "./packages/pi-verify/extensions/pi-verify.ts"
     ],

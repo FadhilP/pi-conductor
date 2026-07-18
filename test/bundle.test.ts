@@ -13,6 +13,7 @@ import heartbeat from "../packages/pi-heartbeat/extensions/pi-heartbeat.ts";
 import helios from "../packages/pi-helios/extensions/pi-helios.ts";
 import searchTools from "../packages/pi-scout/extensions/search-tools.ts";
 import scout from "../packages/pi-scout/extensions/pi-scout.ts";
+import sieve from "../packages/pi-sieve/extensions/pi-sieve.ts";
 import timeline from "../packages/pi-timeline/extensions/pi-timeline.ts";
 import verify from "../packages/pi-verify/extensions/pi-verify.ts";
 import { mapLimit } from "../scripts/run-packages-lib.mjs";
@@ -60,6 +61,7 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
     "./packages/pi-helios/extensions/pi-helios.ts",
     "./packages/pi-scout/extensions/search-tools.ts",
     "./packages/pi-scout/extensions/pi-scout.ts",
+    "./packages/pi-sieve/extensions/pi-sieve.ts",
     "./packages/pi-timeline/extensions/pi-timeline.ts",
     "./packages/pi-verify/extensions/pi-verify.ts",
   ]);
@@ -92,11 +94,11 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
       sendUserMessage: () => {},
       exec: async () => ({ code: 0, stdout: "", stderr: "" }),
     };
-    [advisor, pylon, continuity, focus, guard, grunt, heartbeat, helios, searchTools, scout, timeline, verify]
+    [advisor, pylon, continuity, focus, guard, grunt, heartbeat, helios, searchTools, scout, sieve, timeline, verify]
       .forEach((extension) => extension(pi));
 
     assert.deepEqual([...commands.keys()].sort(), [
-      "advisor", "continuity", "grunt", "guard", "heartbeat", "helios-doctor", "helios-visibility", "memory", "plan", "pylon", "scout", "timeline", "todos", "ui",
+      "advisor", "continuity", "grunt", "guard", "heartbeat", "helios-doctor", "helios-visibility", "memory", "plan", "pylon", "scout", "sieve", "timeline", "todos", "ui",
     ]);
     assert.deepEqual([...tools.keys()].sort(), [
       "advisor", "continuity_update", "fd", "grunt", "heartbeat_cancel", "heartbeat_start", "heartbeat_status", "helios_browser", "helios_capture", "memory", "repo_scout", "rg", "verify", "web_scout",
