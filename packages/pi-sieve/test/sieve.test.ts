@@ -1,11 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import extension from "../extensions/pi-sieve.ts";
+import { loadConfig } from "../src/config.ts";
 import {
   GIANT_ERROR_TAIL_CHARS,
   SIEVE_THRESHOLD,
+  activeOmissionMarker,
   giantErrorMarker,
   omissionMarker,
+  recalledGiantErrorMarker,
+  recalledOmissionMarker,
   sieveMessages,
 } from "../src/sieve.ts";
 
@@ -17,21 +24,27 @@ const textResult = (toolName: string, text: string, extra: Record<string, unknow
   ...extra,
 });
 const user = (content: string) => ({ role: "user", content });
+const recalledResult = (sourceToolName: string, text: string, extraDetails: Record<string, unknown> = {}) =>
+  textResult("sieve_recall", text, {
+    details: { found: true, sourceToolName, sourceIsError: false, ...extraDetails },
+  });
 const noSkips = {
   recentWindow: 0,
   ineligibleTool: 0,
   error: 0,
   nonTextMixedOrEmptyContent: 0,
   atOrBelowThreshold: 0,
+  recoveryUnavailable: 0,
 };
-const noTransformTypes = { ageThreshold: 0, budget: 0, giantError: 0 };
+const noTransformTypes = { ageThreshold: 0, budget: 0, giantError: 0, activeThreshold: 0 };
 
 function oldResultAtAge(age: number, text: string, extra: Record<string, unknown> = {}) {
   return sieveMessages([user("before"), textResult("bash", text, extra), ...Array.from({ length: age }, (_, index) => user(`after-${index}`))], 4_000);
 }
 
 test("uses a compact normal marker and keeps all text blocks as one source", () => {
-  const content = [{ type: "text", text: "x".repeat(4_000) }, { type: "text", text: "y".repeat(4_001) }];
+  const sourceLength = SIEVE_THRESHOLD + 1;
+  const content = [{ type: "text", text: "x".repeat(4_000) }, { type: "text", text: "y".repeat(sourceLength - 4_000) }];
   const result = sieveMessages([
     user("first"),
     { ...textResult("bash", "unused"), content },
@@ -40,14 +53,14 @@ test("uses a compact normal marker and keeps all text blocks as one source", () 
   ]);
   const marker = omissionMarker("bash", SIEVE_THRESHOLD + 1);
 
-  assert.equal(marker, "[pi-sieve: bash 8001 chars omitted]");
+  assert.equal(marker, `[pi-sieve: bash ${sourceLength} chars omitted]`);
   assert.equal((result.messages[1].content as any)[0].text, marker);
   assert.deepEqual(result.stats, {
     scanned: 1,
     transformed: 1,
-    transformedBy: { ageThreshold: 1, budget: 0, giantError: 0 },
-    omittedChars: 8_001,
-    netCharsSaved: 8_001 - marker.length,
+    transformedBy: { ageThreshold: 1, budget: 0, giantError: 0, activeThreshold: 0 },
+    omittedChars: sourceLength,
+    netCharsSaved: sourceLength - marker.length,
     skipped: noSkips,
   });
 });
@@ -113,9 +126,10 @@ test("enforces the retained successful-output budget at equality, overflow, and 
 });
 
 test("truncates only giant eligible text errors and preserves their concatenated source tail", () => {
-  const equal = oldResultAtAge(2, "x".repeat(32_000), { isError: true });
+  const giantBoundary = 32_000;
+  const equal = oldResultAtAge(2, "x".repeat(giantBoundary), { isError: true });
   assert.equal(equal.stats.transformed, 0);
-  assert.equal((equal.messages[1].content as any)[0].text.length, 32_000);
+  assert.equal((equal.messages[1].content as any)[0].text.length, giantBoundary);
 
   const customBoundary = (length: number) => sieveMessages([
     user("before"), textResult("bash", "x".repeat(length), { isError: true }), user("second"), user("third"),
@@ -124,10 +138,12 @@ test("truncates only giant eligible text errors and preserves their concatenated
   assert.equal(customBoundary(40_001).stats.transformedBy.giantError, 1);
 
   const tail = "t".repeat(GIANT_ERROR_TAIL_CHARS);
-  const source = "x".repeat(30_001) + tail;
+  const sourceBoundary = Math.max(32_000, 4 * SIEVE_THRESHOLD);
+  const prefixLength = sourceBoundary + 1 - tail.length;
+  const source = "x".repeat(prefixLength) + tail;
   const result = sieveMessages([
     user("before"),
-    { ...textResult("bash", "unused", { isError: true }), content: [{ type: "text", text: source.slice(0, 30_001) }, { type: "text", text: tail }] },
+    { ...textResult("bash", "unused", { isError: true }), content: [{ type: "text", text: source.slice(0, prefixLength) }, { type: "text", text: tail }] },
     user("second"),
     user("third"),
   ]);
@@ -179,6 +195,7 @@ test("records recent-window and old-result skip reasons, including malformed and
       error: 1,
       nonTextMixedOrEmptyContent: 3,
       atOrBelowThreshold: 3,
+      recoveryUnavailable: 0,
     },
   });
 
@@ -194,7 +211,7 @@ test("records recent-window and old-result skip reasons, including malformed and
 });
 
 test("preserves age 0 and stored session messages", () => {
-  const original = Object.freeze(textResult("fd", "x".repeat(8_001), {
+  const original = Object.freeze(textResult("fd", "x".repeat(SIEVE_THRESHOLD + 1), {
     toolCallId: "preserved-call", isError: false, timestamp: 123, details: { source: "tool" }, custom: true,
   }));
   const ageOneError = textResult("bash", "x".repeat(40_001), { isError: true });
@@ -212,42 +229,183 @@ test("preserves age 0 and stored session messages", () => {
   assert.equal(transformed.timestamp, 123);
   assert.deepEqual(transformed.details, { source: "tool" });
   assert.equal(original.content, originalContent);
-  assert.equal((original.content as any)[0].text.length, 8_001);
+  assert.equal((original.content as any)[0].text.length, SIEVE_THRESHOLD + 1);
   assert.equal(result.messages[3], ageOneError);
   assert.equal(result.messages[4], ageOneSuccess);
   assert.equal(result.messages[6], ageZeroSuccess);
   assert.equal(result.stats.skipped.recentWindow, 1);
 });
 
-test("runtime modes, thresholds, cumulative telemetry, and reset-stats", async () => {
+test("keeps recalls visible at age 0 then prunes eligible recalled output with age", () => {
+  const activeRecall = recalledResult("bash", "x".repeat(50_000));
+  const current = sieveMessages([user("current"), activeRecall], 4_000, { pruneActive: true });
+  assert.equal(current.messages[1], activeRecall);
+  assert.equal(current.stats.transformed, 0);
+
+  const agedRecall = recalledResult("rg", "x".repeat(12_001));
+  const aged = sieveMessages([user("before"), agedRecall, user("after")], 4_000, { pruneActive: true });
+  assert.equal((aged.messages[1].content as any)[0].text, recalledOmissionMarker("rg", 12_001));
+  assert.equal(aged.stats.transformedBy.ageThreshold, 1);
+  assert.equal(aged.stats.transformedBy.activeThreshold, 0);
+
+  const budgetRecall = recalledResult("fd", "r".repeat(1_000));
+  const budgeted = sieveMessages([
+    user("before"),
+    budgetRecall,
+    textResult("bash", "a".repeat(1_000)),
+    textResult("bash", "b".repeat(1_000)),
+    textResult("bash", "c".repeat(1_000)),
+    user("second"),
+    user("third"),
+  ], 1_000);
+  assert.equal((budgeted.messages[1].content as any)[0].text, recalledOmissionMarker("fd", 1_000));
+  assert.equal(budgeted.stats.transformedBy.budget, 1);
+
+  const giantError = recalledResult("bash", "x".repeat(32_001), { sourceIsError: true });
+  const oldError = sieveMessages([user("before"), giantError, user("second"), user("third")], 4_000);
+  assert.equal(
+    (oldError.messages[1].content as any)[0].text,
+    recalledGiantErrorMarker("bash", 32_001) + "x".repeat(GIANT_ERROR_TAIL_CHARS),
+  );
+  assert.equal(oldError.stats.transformedBy.giantError, 1);
+
+  const boundaryError = recalledResult("bash", "x".repeat(32_000), { sourceIsError: true });
+  const retainedError = sieveMessages([user("before"), boundaryError, user("second"), user("third")], 4_000);
+  assert.equal(retainedError.messages[1], boundaryError);
+  assert.equal(retainedError.stats.skipped.error, 1);
+
+  for (const untouched of [
+    recalledResult("read", "x".repeat(50_000)),
+    recalledResult("unknown", "x".repeat(50_000)),
+    textResult("sieve_recall", "x".repeat(50_000), { isError: true, details: { found: true, sourceToolName: "bash", sourceIsError: false } }),
+    textResult("sieve_recall", "x".repeat(50_000), { details: null }),
+    textResult("sieve_recall", "x".repeat(50_000), { details: [] }),
+    textResult("sieve_recall", "x".repeat(50_000), { details: { found: "yes", sourceToolName: "bash", sourceIsError: false } }),
+    textResult("sieve_recall", "x".repeat(50_000), { details: { found: true, sourceToolName: 1, sourceIsError: false } }),
+    textResult("sieve_recall", "x".repeat(50_000), { details: { found: true, sourceToolName: "bash", sourceIsError: "no" } }),
+    textResult("sieve_recall", "x".repeat(50_000), { details: { found: false, sourceToolName: "bash", sourceIsError: false } }),
+  ]) {
+    const result = sieveMessages([user("before"), untouched, user("second"), user("third")], 4_000);
+    assert.equal(result.messages[1], untouched);
+    assert.equal(result.stats.transformed, 0);
+  }
+});
+
+test("optionally prunes recoverable active results on the first turn", () => {
+  const success = textResult("bash", "s".repeat(4_001), { toolCallId: "active-success" });
+  const error = textResult("rg", "e".repeat(4_001), { toolCallId: "active-error", isError: true });
+  const read = textResult("read", "r".repeat(10_000), { toolCallId: "active-read" });
+  const result = sieveMessages([user("first"), success, error, read], 4_000, { pruneActive: true });
+
+  assert.equal(
+    (result.messages[1].content as any)[0].text,
+    activeOmissionMarker("bash", "active-success", 4_001),
+  );
+  assert.equal(
+    (result.messages[2].content as any)[0].text,
+    activeOmissionMarker("rg", "active-error", 4_001),
+  );
+  assert.equal(result.messages[3], read);
+  assert.equal((success.content as any)[0].text.length, 4_001);
+  assert.equal(result.stats.transformedBy.activeThreshold, 2);
+  assert.deepEqual(
+    new Set(result.recoverableActiveResults.map(({ toolCallId }) => toolCallId)),
+    new Set(["active-success", "active-error"]),
+  );
+
+  const equal = sieveMessages([user("first"), textResult("bash", "x".repeat(4_000))], 4_000, { pruneActive: true });
+  assert.equal(equal.stats.transformed, 0);
+
+  const duplicateOrMissing = sieveMessages([
+    user("first"),
+    textResult("bash", "a".repeat(4_001), { toolCallId: "duplicate" }),
+    textResult("bash", "b".repeat(4_001), { toolCallId: "duplicate" }),
+    textResult("bash", "c".repeat(4_001), { toolCallId: "" }),
+  ], 4_000, { pruneActive: true });
+  assert.equal(duplicateOrMissing.stats.transformed, 0);
+  assert.equal(duplicateOrMissing.stats.skipped.recoveryUnavailable, 3);
+
+  const oversizedMarker = sieveMessages([
+    user("first"),
+    textResult("bash", "x".repeat(101), { toolCallId: "id".repeat(100) }),
+  ], 100, { pruneActive: true });
+  assert.equal(oversizedMarker.stats.transformed, 0);
+  assert.equal(oversizedMarker.stats.skipped.recoveryUnavailable, 1);
+});
+
+test("runtime modes, persisted settings, active recall, thresholds, and telemetry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-sieve-runtime-"));
+  const settingsPath = join(directory, "config.json");
   const handlers = new Map<string, Function[]>();
   const commands = new Map<string, any>();
+  const tools = new Map<string, any>();
+  let activeTools = ["bash", "read"];
+  let runtimeInitialized = false;
+  const eventHandlers = new Map<string, Function[]>();
   extension({
     on: (name: string, handler: Function) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
     registerCommand: (name: string, command: any) => commands.set(name, command),
-  } as any);
+    registerTool: (tool: any) => {
+      tools.set(tool.name, tool);
+      activeTools.push(tool.name);
+    },
+    getActiveTools: () => {
+      assert.equal(runtimeInitialized, true, "action API called during extension loading");
+      return [...activeTools];
+    },
+    setActiveTools: (names: string[]) => {
+      assert.equal(runtimeInitialized, true, "action API called during extension loading");
+      activeTools = [...names];
+    },
+    events: {
+      on: (name: string, handler: Function) => {
+        eventHandlers.set(name, [...(eventHandlers.get(name) ?? []), handler]);
+        return () => {};
+      },
+      emit: (name: string, value: unknown) => {
+        for (const handler of eventHandlers.get(name) ?? []) handler(value);
+      },
+    },
+  } as any, { configPath: settingsPath });
+  assert.equal(activeTools.includes("sieve_recall"), true);
+  runtimeInitialized = true;
+  for (const handler of handlers.get("session_start") ?? []) await handler({}, {});
+  assert.equal(activeTools.includes("sieve_recall"), false);
   const hook = handlers.get("context")![0];
   const command = commands.get("sieve");
-  const context = { messages: [user("first"), textResult("ls", "x".repeat(8_001)), user("second"), user("third")] };
+  const oversizedLength = SIEVE_THRESHOLD + 1;
+  const context = { messages: [user("first"), textResult("ls", "x".repeat(oversizedLength)), user("second"), user("third")] };
   let notification = "";
   const ctx: any = { ui: { notify: (text: string) => { notification = text; } } };
 
+  await Promise.all([
+    command.handler("active enable", ctx),
+    command.handler("threshold 12000", ctx),
+  ]);
+  assert.deepEqual(await loadConfig(settingsPath), {
+    version: 1,
+    activePruning: true,
+    threshold: 12_000,
+  });
+  await command.handler("active disable", ctx);
+  await command.handler("threshold reset", ctx);
+
   await command.handler("observe", ctx);
   assert.equal(hook(context), undefined);
-  assert.equal((context.messages[1].content[0] as { text: string }).text.length, 8_001);
+  assert.equal((context.messages[1].content[0] as { text: string }).text.length, oversizedLength);
   await command.handler("status", ctx);
   assert.match(notification, /pi-sieve: observe/);
-  assert.match(notification, /Latest call \(observe projections\): scanned 1; projected transformations 1; transform types: age-threshold 1, budget 0, giant-error 0; projected gross omitted ~2001 tokens/);
+  assert.match(notification, new RegExp(`Latest call \\(observe projections\\): scanned 1; projected transformations 1; transform types: age-threshold 1, budget 0, giant-error 0, active-threshold 0; projected gross omitted ~${Math.ceil(oversizedLength / 4)} tokens`));
   assert.match(notification, /actual transformations 0.*projected observe transformations 1/);
 
   await command.handler("enable", ctx);
   const outbound = hook(context);
   assert.notEqual(outbound.messages[1], context.messages[1]);
   await command.handler("status", ctx);
-  const net = 8_001 - omissionMarker("ls", 8_001).length;
+  const net = oversizedLength - omissionMarker("ls", oversizedLength).length;
   const estimatedNetTokens = Math.ceil(net / 4);
   assert.match(notification, /actual transformations 1.*projected observe transformations 1/);
-  assert.match(notification, new RegExp(`actual net saved ~${estimatedNetTokens} tokens; projected observe transformations 1; projected observe gross omitted ~2001 tokens; projected observe net saved ~${estimatedNetTokens} tokens`));
+  assert.match(notification, new RegExp(`actual net saved ~${estimatedNetTokens} tokens; projected observe transformations 1; projected observe gross omitted ~${Math.ceil(oversizedLength / 4)} tokens; projected observe net saved ~${estimatedNetTokens} tokens`));
 
   await command.handler("threshold 1000", ctx);
   await command.handler("status", ctx);
@@ -261,7 +419,50 @@ test("runtime modes, thresholds, cumulative telemetry, and reset-stats", async (
   assert.equal(notification, "Threshold must be an integer from 1000 to 50000.");
   await command.handler("threshold reset", ctx);
   await command.handler("status", ctx);
-  assert.match(notification, /Threshold: > ~2000 tokens \(8000 JS characters; estimated at 4 characters\/token\)/);
+  assert.match(notification, new RegExp(`Threshold: > ~${Math.ceil(SIEVE_THRESHOLD / 4)} tokens \\(${SIEVE_THRESHOLD} JS characters; estimated at 4 characters/token\\)`));
+  assert.match(notification, /Active-result pruning: disabled/);
+
+  await command.handler("active enable", ctx);
+  assert.deepEqual(await loadConfig(settingsPath), {
+    version: 1,
+    activePruning: true,
+    threshold: SIEVE_THRESHOLD,
+  });
+  assert.equal(activeTools.includes("sieve_recall"), true);
+  await command.handler("observe", ctx);
+  assert.equal(activeTools.includes("sieve_recall"), false);
+  await command.handler("enable", ctx);
+  assert.equal(activeTools.includes("sieve_recall"), true);
+  const activeSource = textResult("bash", "z".repeat(oversizedLength), { toolCallId: "active-runtime" });
+  const activeOutbound = hook({ messages: [user("first"), activeSource] });
+  assert.equal(
+    activeOutbound.messages[1].content[0].text,
+    activeOmissionMarker("bash", "active-runtime", oversizedLength),
+  );
+  hook({ messages: [user("partial same turn")] });
+  const recallTool = tools.get("sieve_recall");
+  const recalled = await recallTool.execute("recall-call", { toolCallId: "active-runtime" });
+  assert.equal(recalled.content[0].text.length, oversizedLength);
+  assert.equal(recalled.details.sourceToolName, "bash");
+  recalled.content[0].text = "mutated response";
+  const recalledAgain = await recallTool.execute("recall-call-2", { toolCallId: "active-runtime" });
+  assert.equal(recalledAgain.content[0].text.length, oversizedLength);
+  await command.handler("status", ctx);
+  assert.match(notification, /Active-result pruning: enabled/);
+  assert.match(notification, new RegExp(`Active recalls: 2; restored ~${Math.ceil(2 * oversizedLength / 4)} tokens`));
+  for (const handler of handlers.get("input") ?? []) await handler({ source: "interactive" }, {});
+  const missed = await recallTool.execute("recall-call-3", { toolCallId: "active-runtime" });
+  assert.equal(missed.details.found, false);
+  activeTools.push("later-tool");
+  await command.handler("active disable", ctx);
+  assert.deepEqual(await loadConfig(settingsPath), {
+    version: 1,
+    activePruning: false,
+    threshold: SIEVE_THRESHOLD,
+  });
+  assert.equal(activeTools.includes("sieve_recall"), false);
+  assert.equal(activeTools.includes("later-tool"), true);
+  assert.equal(hook({ messages: [user("first"), activeSource] }).messages[1], activeSource);
 
   await command.handler("threshold 1000", ctx);
   await command.handler("disable", ctx);
@@ -274,4 +475,30 @@ test("runtime modes, thresholds, cumulative telemetry, and reset-stats", async (
   assert.match(notification, /Latest call .*scanned 0; .* transformations 0/);
   await command.handler("what", ctx);
   assert.match(notification, /^Usage: \/sieve enable\|observe\|disable/);
+  assert.deepEqual(await loadConfig(settingsPath), {
+    version: 1,
+    activePruning: false,
+    threshold: 1_000,
+  });
+
+  await command.handler("active enable", ctx);
+  const resumedHandlers = new Map<string, Function[]>();
+  const resumedCommands = new Map<string, any>();
+  let resumedActiveTools = ["bash"];
+  extension({
+    on: (name: string, handler: Function) => resumedHandlers.set(name, [...(resumedHandlers.get(name) ?? []), handler]),
+    registerCommand: (name: string, command: any) => resumedCommands.set(name, command),
+    registerTool: (tool: any) => { resumedActiveTools.push(tool.name); },
+    getActiveTools: () => [...resumedActiveTools],
+    setActiveTools: (names: string[]) => { resumedActiveTools = [...names]; },
+    events: { on: () => () => {}, emit: () => {} },
+  } as any, { configPath: settingsPath });
+  for (const handler of resumedHandlers.get("session_start") ?? []) await handler({}, {});
+  assert.equal(resumedActiveTools.includes("sieve_recall"), true);
+  let resumedStatus = "";
+  await resumedCommands.get("sieve").handler("status", {
+    ui: { notify: (text: string) => { resumedStatus = text; } },
+  });
+  assert.match(resumedStatus, /Threshold: > ~250 tokens \(1000 JS characters/);
+  assert.match(resumedStatus, /Active-result pruning: enabled/);
 });

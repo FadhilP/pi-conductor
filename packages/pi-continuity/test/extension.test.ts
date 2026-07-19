@@ -91,7 +91,12 @@ test("continuity and memory guidance stay dedicated", () => {
   assert.match(guidance, /bulk-complete finished implementation todos/i);
   assert.match(guidance, /existing final todo that includes verification/i);
   assert.match(guidance, /run Verify first, then mark that todo done in a tool-only turn/i);
-  assert.match(guidance, /exactly one evidence-aware final response/i);
+  assert.match(guidance, /every nonterminal continuity update tool-only and before final text/i);
+  assert.match(guidance, /never narrate progress before calling it/i);
+  assert.match(guidance, /exactly one evidence-aware text-only final response/i);
+  assert.match(guidance, /Verify fails, is cancelled, stale, or errors/i);
+  assert.match(guidance, /end the assistant run with no subsequent tool call/i);
+  assert.match(guidance, /failed verification never qualifies/i);
   assert.doesNotMatch(guidance, /verification follows below/i);
   assert.match(guidance, /Continuity completes automatically/i);
   assert.match(guidance, /skip Verify for read-only work/i);
@@ -231,6 +236,19 @@ test("automatic completion waits for required verification", async () => {
     await app.handlers.get("message_end")?.[0]?.(finalMessage, ctx);
     let blocked = await tool.execute("complete", { action: "state", completion: true }, undefined, undefined, ctx);
     assert.match(blocked.content[0].text, /Cannot complete until/);
+
+    app.emit("pi-verify:result", {
+      version: 1, cwd, state: "failed", runId: "failed",
+      results: [{ command: "npm test", code: 1 }],
+    });
+    await app.handlers.get("message_end")?.[0]?.(finalMessage, ctx);
+    assert.deepEqual(app.sent, [], "failed Verify final must not schedule another turn");
+    let context = await app.handlers.get("context")?.[0]({ messages: [] }, ctx);
+    assert.match(context.messages.at(-1).content, /Work: executing/);
+    assert.match(context.messages.at(-1).content, /Verification failed/);
+    blocked = await tool.execute("complete", { action: "state", completion: true, allowUnverified: true }, undefined, undefined, ctx);
+    assert.match(blocked.content[0].text, /Cannot complete until/);
+    assert.equal(blocked.terminate, undefined);
 
     app.emit("pi-verify:result", { version: 1, cwd, state: "passed", runId: "run", results: [] });
     await app.handlers.get("message_end")?.[0]?.(finalMessage, ctx);

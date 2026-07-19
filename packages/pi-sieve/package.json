@@ -8,7 +8,7 @@
   "files": ["extensions", "src", "README.md", "LICENSE"],
   "scripts": { "test": "node --test test/*.test.ts", "check": "tsc --noEmit" },
   "pi": { "extensions": ["./extensions/pi-sieve.ts"] },
-  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "typebox": "*" },
   "devDependencies": { "typescript": "^5.8.0" },
   "license": "MIT"
 }

@@ -1,9 +1,14 @@
-export const SIEVE_THRESHOLD = 8_000;
+export const SIEVE_THRESHOLD = 8_192;
 export const ELIGIBLE_TOOL_NAMES = ["bash", "grep", "find", "ls", "rg", "fd"] as const;
 export const READ_TOOL_NAME = "read";
+export const RECALL_TOOL_NAME = "sieve_recall";
 export const RECENT_WINDOW_POLICY =
-  "Age 0 is preserved; successful eligible age-1 output is capped at three times the threshold.";
-export const GIANT_ERROR_TAIL_CHARS = 2_000;
+  "Age 0 is preserved unless opt-in active pruning is enabled; successful eligible age-1 output is capped at three times the threshold.";
+export const GIANT_ERROR_TAIL_CHARS = 2_048;
+
+export type SieveOptions = {
+  pruneActive?: boolean;
+};
 
 export type EligibleToolName = (typeof ELIGIBLE_TOOL_NAMES)[number];
 
@@ -23,10 +28,11 @@ export type SkipStats = {
   error: number;
   nonTextMixedOrEmptyContent: number;
   atOrBelowThreshold: number;
+  recoveryUnavailable: number;
 };
 
 export type TransformStats = {
-  /** Old tool results inspected by the sieve. */
+  /** Tool results inspected by the sieve. */
   scanned: number;
   /** Results that qualify for replacement (or projection in observe mode). */
   transformed: number;
@@ -35,6 +41,7 @@ export type TransformStats = {
     ageThreshold: number;
     budget: number;
     giantError: number;
+    activeThreshold: number;
   };
   /** Source text characters omitted (or projected to be omitted). */
   omittedChars: number;
@@ -43,9 +50,17 @@ export type TransformStats = {
   skipped: SkipStats;
 };
 
+export type RecoverableActiveResult = {
+  toolCallId: string;
+  toolName: string;
+  content: TextBlock[];
+  isError: boolean;
+};
+
 export type TransformResult<T extends ContextMessage> = {
   messages: T[];
   stats: TransformStats;
+  recoverableActiveResults: RecoverableActiveResult[];
 };
 
 const eligibleTools = new Set<string>(ELIGIBLE_TOOL_NAMES);
@@ -54,7 +69,7 @@ export function emptyTransformStats(): TransformStats {
   return {
     scanned: 0,
     transformed: 0,
-    transformedBy: { ageThreshold: 0, budget: 0, giantError: 0 },
+    transformedBy: { ageThreshold: 0, budget: 0, giantError: 0, activeThreshold: 0 },
     omittedChars: 0,
     netCharsSaved: 0,
     skipped: {
@@ -63,6 +78,7 @@ export function emptyTransformStats(): TransformStats {
       error: 0,
       nonTextMixedOrEmptyContent: 0,
       atOrBelowThreshold: 0,
+      recoveryUnavailable: 0,
     },
   };
 }
@@ -74,6 +90,7 @@ export function addTransformStats(target: TransformStats, source: TransformStats
   target.transformedBy.ageThreshold += source.transformedBy.ageThreshold;
   target.transformedBy.budget += source.transformedBy.budget;
   target.transformedBy.giantError += source.transformedBy.giantError;
+  target.transformedBy.activeThreshold += source.transformedBy.activeThreshold;
   target.omittedChars += source.omittedChars;
   target.netCharsSaved += source.netCharsSaved;
   target.skipped.recentWindow += source.skipped.recentWindow;
@@ -81,6 +98,7 @@ export function addTransformStats(target: TransformStats, source: TransformStats
   target.skipped.error += source.skipped.error;
   target.skipped.nonTextMixedOrEmptyContent += source.skipped.nonTextMixedOrEmptyContent;
   target.skipped.atOrBelowThreshold += source.skipped.atOrBelowThreshold;
+  target.skipped.recoveryUnavailable += source.skipped.recoveryUnavailable;
   return target;
 }
 
@@ -90,6 +108,18 @@ export function omissionMarker(toolName: string, sourceChars: number) {
 
 export function giantErrorMarker(toolName: string, sourceChars: number) {
   return `[pi-sieve: ${toolName} error ${sourceChars} chars truncated]\n`;
+}
+
+export function recalledOmissionMarker(toolName: string, sourceChars: number) {
+  return `[pi-sieve: recalled ${toolName} ${sourceChars} chars omitted]`;
+}
+
+export function recalledGiantErrorMarker(toolName: string, sourceChars: number) {
+  return `[pi-sieve: recalled ${toolName} error ${sourceChars} chars truncated]\n`;
+}
+
+export function activeOmissionMarker(toolName: string, toolCallId: string, sourceChars: number) {
+  return `[pi-sieve: ${toolName} active result ${sourceChars} chars omitted; use sieve_recall with toolCallId ${JSON.stringify(toolCallId)}]`;
 }
 
 function textOnlyBlocks(content: unknown): TextBlock[] | undefined {
@@ -127,16 +157,25 @@ export function effectiveThresholdForAge(age: number, threshold: number) {
   return Math.max(1_000, Math.floor(threshold / 2));
 }
 
-function isEligibleTool(message: ContextMessage): message is ContextMessage & {
-  role: "toolResult";
-  toolName: string;
-  content: unknown;
-  isError?: unknown;
-} {
+type SieveSource = { toolName: string; isError: boolean; recalled: boolean };
+
+function sieveSource(message: ContextMessage, allowRecall: boolean): SieveSource | undefined {
   const fields = message as Record<string, unknown>;
-  return typeof fields.toolName === "string" &&
-    eligibleTools.has(fields.toolName) &&
-    fields.toolName !== READ_TOOL_NAME;
+  if (fields.role !== "toolResult" || typeof fields.toolName !== "string") return undefined;
+  if (eligibleTools.has(fields.toolName)) {
+    return { toolName: fields.toolName, isError: fields.isError === true, recalled: false };
+  }
+  if (!allowRecall || fields.toolName !== RECALL_TOOL_NAME || fields.isError === true) return undefined;
+  const details = fields.details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+  const recall = details as Record<string, unknown>;
+  if (
+    recall.found !== true ||
+    typeof recall.sourceToolName !== "string" ||
+    !eligibleTools.has(recall.sourceToolName) ||
+    typeof recall.sourceIsError !== "boolean"
+  ) return undefined;
+  return { toolName: recall.sourceToolName, isError: recall.sourceIsError, recalled: true };
 }
 
 function replaceWithMarker<T extends ContextMessage>(message: T, marker: string): T {
@@ -151,6 +190,7 @@ function replaceWithMarker<T extends ContextMessage>(message: T, marker: string)
 export function sieveMessages<T extends ContextMessage>(
   messages: readonly T[],
   threshold = SIEVE_THRESHOLD,
+  options: SieveOptions = {},
 ): TransformResult<T> {
   const userIndexes = messages.reduce<number[]>((indexes, message, index) => {
     if (message.role === "user") indexes.push(index);
@@ -166,6 +206,16 @@ export function sieveMessages<T extends ContextMessage>(
 
   const stats = emptyTransformStats();
   const replacements = new Map<number, T>();
+  const recoverableActiveResults: RecoverableActiveResult[] = [];
+  const activeToolCallIdCounts = new Map<string, number>();
+  if (options.pruneActive) {
+    for (let index = 0; index < messages.length; index++) {
+      const fields = messages[index] as Record<string, unknown>;
+      if (fields.role !== "toolResult" || usersAfter[index] !== 0) continue;
+      if (typeof fields.toolCallId !== "string" || !fields.toolCallId) continue;
+      activeToolCallIdCounts.set(fields.toolCallId, (activeToolCallIdCounts.get(fields.toolCallId) ?? 0) + 1);
+    }
+  }
   const retainedBudget = 3 * threshold;
   let retainedChars = 0;
 
@@ -174,23 +224,74 @@ export function sieveMessages<T extends ContextMessage>(
     const message = messages[index];
     if (message.role !== "toolResult") continue;
     const age = usersAfter[index];
-    if (cutoff === undefined || age === 0) {
+    if (age === 0) {
+      if (!options.pruneActive) {
+        stats.skipped.recentWindow++;
+        continue;
+      }
+      stats.scanned++;
+      const source = sieveSource(message, false);
+      if (!source) {
+        stats.skipped.ineligibleTool++;
+        continue;
+      }
+      const blocks = textOnlyBlocks((message as Record<string, unknown>).content);
+      const sourceLength = blocks?.reduce((length, block) => length + block.text.length, 0);
+      if (!blocks || sourceLength === undefined) {
+        stats.skipped.nonTextMixedOrEmptyContent++;
+        continue;
+      }
+      if (sourceLength <= threshold) {
+        stats.skipped.atOrBelowThreshold++;
+        continue;
+      }
+      const toolCallId = (message as Record<string, unknown>).toolCallId;
+      if (
+        typeof toolCallId !== "string" ||
+        !toolCallId ||
+        activeToolCallIdCounts.get(toolCallId) !== 1
+      ) {
+        stats.skipped.recoveryUnavailable++;
+        continue;
+      }
+      const marker = activeOmissionMarker(source.toolName, toolCallId, sourceLength);
+      if (marker.length >= sourceLength) {
+        stats.skipped.recoveryUnavailable++;
+        continue;
+      }
+      replacements.set(index, replaceWithMarker(message, marker));
+      recoverableActiveResults.push({
+        toolCallId,
+        toolName: source.toolName,
+        content: blocks.map((block) => ({ ...block })),
+        isError: (message as { isError?: unknown }).isError === true,
+      });
+      stats.transformed++;
+      stats.transformedBy.activeThreshold++;
+      stats.omittedChars += sourceLength;
+      stats.netCharsSaved += Math.max(0, sourceLength - marker.length);
+      continue;
+    }
+    if (cutoff === undefined) {
       stats.skipped.recentWindow++;
       continue;
     }
 
     stats.scanned++;
-    if (!isEligibleTool(message)) {
+    const source = sieveSource(message, true);
+    if (!source) {
       stats.skipped.ineligibleTool++;
       continue;
     }
 
-    const sourceLength = textOnlyContentLength(message.content);
-    if ((message as { isError?: unknown }).isError === true) {
+    const sourceLength = textOnlyContentLength((message as Record<string, unknown>).content);
+    if (source.isError) {
       const giantThreshold = Math.max(32_000, 4 * threshold);
       if (age > 1 && sourceLength !== undefined && sourceLength > giantThreshold) {
-        const marker = giantErrorMarker(message.toolName, sourceLength);
-        const tail = textOnlyContentTail(message.content, GIANT_ERROR_TAIL_CHARS)!;
+        const marker = source.recalled
+          ? recalledGiantErrorMarker(source.toolName, sourceLength)
+          : giantErrorMarker(source.toolName, sourceLength);
+        const tail = textOnlyContentTail((message as Record<string, unknown>).content, GIANT_ERROR_TAIL_CHARS)!;
         replacements.set(index, replaceWithMarker(message, marker + tail));
         stats.transformed++;
         stats.transformedBy.giantError++;
@@ -209,7 +310,9 @@ export function sieveMessages<T extends ContextMessage>(
 
     const effectiveThreshold = age === 1 ? 3 * threshold : effectiveThresholdForAge(age, threshold);
     if (sourceLength > effectiveThreshold) {
-      const marker = omissionMarker(message.toolName, sourceLength);
+      const marker = source.recalled
+        ? recalledOmissionMarker(source.toolName, sourceLength)
+        : omissionMarker(source.toolName, sourceLength);
       replacements.set(index, replaceWithMarker(message, marker));
       stats.transformed++;
       stats.transformedBy.ageThreshold++;
@@ -224,7 +327,9 @@ export function sieveMessages<T extends ContextMessage>(
     }
 
     if (retainedChars + sourceLength > retainedBudget) {
-      const marker = omissionMarker(message.toolName, sourceLength);
+      const marker = source.recalled
+        ? recalledOmissionMarker(source.toolName, sourceLength)
+        : omissionMarker(source.toolName, sourceLength);
       replacements.set(index, replaceWithMarker(message, marker));
       stats.transformed++;
       stats.transformedBy.budget++;
@@ -240,5 +345,6 @@ export function sieveMessages<T extends ContextMessage>(
   return {
     messages: messages.map((message, index) => replacements.get(index) ?? message),
     stats,
+    recoverableActiveResults,
   };
 }
