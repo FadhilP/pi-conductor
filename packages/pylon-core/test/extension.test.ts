@@ -171,6 +171,39 @@ test("tools command manages baseline while restrictive gates remain authoritativ
   assert.match(message, /Effective:/);
 });
 
+test("tokens command rebuilds branch usage and tracks custom tool results", async () => {
+  const runtime = harness();
+  let report = "";
+  const ctx = {
+    sessionManager: {
+      getBranch: () => [
+        { type: "message", message: { role: "assistant", content: [
+          { type: "toolCall", id: "read-1", name: "read", arguments: { path: "a.ts" } },
+        ] } },
+        { type: "message", message: {
+          role: "toolResult", toolCallId: "read-1", toolName: "read",
+          content: [{ type: "text", text: "source" }], isError: false,
+        } },
+      ],
+    },
+    ui: { notify: (text: string) => { report = text; } },
+  };
+  for (const handler of runtime.handlers.get("session_start") ?? [])
+    await handler({ reason: "startup" }, ctx);
+
+  for (const handler of runtime.handlers.get("tool_result") ?? []) {
+    await handler({
+      toolCallId: "custom-1", toolName: "custom_tool", input: { query: "x" },
+      content: [{ type: "text", text: "answer" }], isError: false,
+    }, ctx);
+  }
+  await runtime.commands.get("tokens").handler("", ctx);
+
+  assert.match(report, /read: 1 call/);
+  assert.match(report, /custom_tool: 1 call/);
+  assert.match(report, /Total: 2 calls/);
+});
+
 test("acknowledges policy only after successful reconcile", () => {
   const runtime = harness();
   let acknowledgements = 0;

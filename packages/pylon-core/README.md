@@ -16,6 +16,7 @@ This installs the complete Pylon bundle, including pylon-core. Run `/reload` aft
 - `/pylon doctor` also checks local Pi and Node compatibility, required and optional executables, old locks, quarantined state, configured child-model availability, package tool surfaces, and bounded package health reports without network calls.
 - `/pylon tools status` shows baseline tools, effective tools, and whether a restrictive gate is active.
 - `/pylon tools enable edit write` enables registered unmanaged tools; `/pylon tools disable edit write` disables them. Policy-managed tools must be changed through their owning package. Active gates remain authoritative, so enabling a blocked tool is deferred until every restrictive gate clears.
+- `/tokens` reports estimated payload tokens for every built-in and custom tool used on the current session branch. It counts serialized arguments and text results at roughly four characters per token; images and errors are reported separately.
 
 Guard remains the independent final safety authority; Pylon never approves or weakens it.
 
@@ -32,6 +33,7 @@ Guard remains the independent final safety authority; Pylon never approves or we
 - Coordinates pi-advisor, pi-grunt, pi-scout, and pi-continuity.
 - Falls back to each package's standalone behavior when Pylon is absent.
 - Tests real package adapters together.
+- Tracks per-tool calls and estimated argument/result payload tokens without modifying session data.
 
 V1 does not coordinate TUI ownership, context ordering, storage, child processes, or benchmark packages. Those remain out of scope until concrete conflicts appear.
 

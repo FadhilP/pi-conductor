@@ -54,7 +54,7 @@ Run `/pylon doctor` to check model availability, credentials, dependencies, tool
 ## Bundled Packages
 
 - **[pi-advisor](./packages/pi-advisor)** — Consults a selected tool-free model for difficult planning, architecture review, and failure recovery using bounded, redacted context.
-- **[pylon-core](./packages/pylon-core)** — Coordinates tool policies from Advisor, Scout, and Continuity while preserving standalone behavior.
+- **[pylon-core](./packages/pylon-core)** — Coordinates tool policies from Advisor, Scout, and Continuity, and reports per-tool estimated session payload tokens.
 - **[pi-continuity](./packages/pi-continuity)** — Adds explicit plan mode, structured clarifications, visible task lists, and opt-in durable workspace memory.
 - **[pi-focus](./packages/pi-focus)** — Provides a low-noise Pi terminal UI, compact or comfortable layouts, and the `focus-dark` theme.
 - **[pi-guard](./packages/pi-guard)** — Intercepts risky shell and file operations, requests confirmation for known destructive actions, and blocks unsafe writes.

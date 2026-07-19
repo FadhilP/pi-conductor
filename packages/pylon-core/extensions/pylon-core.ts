@@ -8,6 +8,11 @@ import {
   reconcileTools,
   type ToolPolicy,
 } from "../src/tools.ts";
+import {
+  formatTokenMeter,
+  meterFromBranch,
+  recordToolResult,
+} from "../src/token-meter.ts";
 
 export default function pylonCoreExtension(pi: ExtensionAPI) {
   const baseline = new Set<string>();
@@ -18,6 +23,7 @@ export default function pylonCoreExtension(pi: ExtensionAPI) {
   let lastError: string | undefined;
   let lastAcknowledgeError: string | undefined;
   let guardDiagnostic: string | undefined;
+  let tokenMeter = meterFromBranch([]);
 
   const hasGate = () => [...policies.values()].some((policy) => policy.allowOnly);
   const managedTools = () =>
@@ -150,10 +156,16 @@ export default function pylonCoreExtension(pi: ExtensionAPI) {
     };
   };
 
-  pi.on("session_start", () => {
+  const rebuildTokenMeter = (ctx: any) => {
+    tokenMeter = meterFromBranch(ctx.sessionManager?.getBranch?.() ?? []);
+  };
+  pi.on("session_start", (_event, ctx) => {
     captureBaseline();
     reconcile();
+    rebuildTokenMeter(ctx);
   });
+  pi.on("session_tree", (_event, ctx) => rebuildTokenMeter(ctx));
+  pi.on("tool_result", (event) => recordToolResult(tokenMeter, event));
   pi.on("session_shutdown", () => {
     disposePolicyListener();
     disposeGuardListener();
@@ -323,6 +335,13 @@ export default function pylonCoreExtension(pi: ExtensionAPI) {
       deferred.length ? "warning" : "info",
     );
   };
+
+  pi.registerCommand("tokens", {
+    description: "Show estimated payload tokens used by each tool in the current session branch",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify(formatTokenMeter(tokenMeter), "info");
+    },
+  });
 
   pi.registerCommand("pylon", {
     description: "Show policies or manage tools with /pylon tools",
