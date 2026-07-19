@@ -88,7 +88,11 @@ test("Grunt runs synchronously with per-call thinking and derives changed paths"
       ui: { setStatus() {}, notify: (text: string, level: string) => notifications.push({ text, level }) },
     };
     for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
-    const result = await tools.get("grunt").execute("id", { task: "Add trivial worker module", thinking: "medium", suggestedPaths: ["src/**"] }, undefined, (update: any) => runningUpdates.push(update), ctx);
+    const result = await tools.get("grunt").execute("id", {
+      task: "Add trivial worker module", thinking: "medium", suggestedPaths: ["src/**"],
+      targetedContext: "Copy the existing exported-constant convention.",
+      checkCommands: ["npm test -- worker"],
+    }, undefined, (update: any) => runningUpdates.push(update), ctx);
     const activityUpdate = runningUpdates.find((update) => update.details?.activity?.length);
     assert.equal(activityUpdate.details.state, "running");
     assert.ok(activityUpdate.details.durationMs > 0);
@@ -105,9 +109,17 @@ test("Grunt runs synchronously with per-call thinking and derives changed paths"
     assert.doesNotMatch(result.content[0].text, /Derived changed paths|Worker report/);
     assert.equal(childArgs[childArgs.indexOf("--thinking") + 1], "medium");
     assert.ok(childArgs.includes("--no-extensions"));
-    assert.doesNotMatch(childArgs.at(-1) ?? "", /Add worker/);
+    assert.ok(childArgs.includes("--system-prompt"));
+    assert.ok(!childArgs.includes("--append-system-prompt"));
+    assert.match(childArgs.at(-1) ?? "", /Targeted context.*exported-constant convention/s);
+    assert.match(childArgs.at(-1) ?? "", /Focused checks:\n- npm test -- worker/);
     assert.match(childArgs.at(-1) ?? "", /Unavailable ignored dependency directories: node_modules/);
     assert.equal(result.details.missingDependencies, undefined);
+    assert.deepEqual(result.details.metrics, {
+      workerStatus: "completed", integrationStatus: "completed", workerCostUsd: 0,
+      turns: 1, inputTokens: 1, outputTokens: 2, cacheReadTokens: 0,
+      cacheWriteTokens: 0, changedFileCount: 1,
+    });
     assert.equal((await import("node:fs/promises").then((fs) => fs.readFile(join(cwd, "src", "worker.ts"), "utf8"))).replace(/\r\n/g, "\n"), "export const completed = true;\n");
 
     outcome = "blocked";
@@ -116,6 +128,8 @@ test("Grunt runs synchronously with per-call thinking and derives changed paths"
     assert.equal(blocked.details.applied, false);
     assert.deepEqual(blocked.details.changedPaths, ["src/blocked.ts"]);
     assert.match(blocked.content[0].text, /Worker report/);
+    assert.equal(blocked.details.metrics.workerStatus, "partial");
+    assert.equal(blocked.details.metrics.integrationStatus, "partial");
     assert.ok(blocked.details.artifactPath);
     await access(blocked.details.artifactPath);
     await assert.rejects(access(join(cwd, "src", "blocked.ts")));
@@ -138,6 +152,12 @@ test("Grunt runs synchronously with per-call thinking and derives changed paths"
     assert.equal(direct.details.workerCwd, cwd);
     assert.match(direct.content[0].text, /partial edits|affected the current working directory/i);
     assert.doesNotMatch(direct.content[0].text, /Worker report/);
+    await commands.get("grunt").handler("status", ctx);
+    assert.match(notifications.at(-1)!.text, /2\/3 integrated · 1 requiring main attention · 3 turns/);
+    assert.match(notifications.at(-1)!.text, /exclude main-model handoff, review, repair, and verification cost/);
+    for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "new" }, ctx);
+    await commands.get("grunt").handler("status", ctx);
+    assert.match(notifications.at(-1)!.text, /Session worker metrics: no runs yet/);
     for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
     await assert.rejects(access(blocked.details.artifactPath));
     await assert.rejects(access(dirname(blocked.details.artifactPath)));
@@ -182,7 +202,7 @@ test("dynamic mode falls back to direct when isolation setup fails", async () =>
   }
 });
 
-test("Grunt guidance decomposes large semantic work and retains Main ownership", () => {
+test("Grunt guidance favors high-displacement work and retains Main ownership", () => {
   const events = new Bus();
   const tools = new Map<string, any>();
   const pi: any = {
@@ -193,19 +213,20 @@ test("Grunt guidance decomposes large semantic work and retains Main ownership",
   const tool = tools.get("grunt");
   const guidance = tool.promptGuidelines.join("\n");
   assert.deepEqual(tool.parameters.properties.thinking.enum, ["medium", "high"]);
+  assert.equal(tool.parameters.properties.targetedContext.maxLength, 4000);
+  assert.equal(tool.parameters.properties.checkCommands.maxItems, 8);
   assert.match(tool.description, /unlimited per original user prompt/i);
-  assert.match(guidance, /small is under 50 LOC/i);
-  assert.match(guidance, /medium is 50–400 LOC inclusive/i);
-  assert.match(guidance, /large is over 400 LOC/i);
-  assert.match(guidance, /Reasoning complexity.*override LOC/i);
-  assert.match(guidance, /Large non-mechanical work must be decomposed into coherent sequential slices/i);
-  assert.match(guidance, /200–300 changed LOC or less per semantic slice/i);
-  assert.match(guidance, /whole large change only when behavior is simple and validation is decisive/i);
+  assert.match(guidance, /expected main-model effort avoided, not changed LOC alone/i);
+  assert.match(guidance, /ordinary semantic changes around 50–300 LOC in the main model/i);
+  assert.match(guidance, /mechanical or repetitive multi-file work/i);
+  assert.match(guidance, /typically 300–500\+ LOC/i);
+  assert.match(guidance, /medium thinking for mechanical or bounded semantic work/i);
   assert.match(guidance, /inspect its applied changes, run focused verification, then invoke the next Grunt/i);
-  assert.match(guidance, /Main model must own difficult architecture/i);
+  assert.match(guidance, /Main model owns difficult architecture/i);
   assert.match(guidance, /advisor at least once when available/i);
-  assert.match(guidance, /Provide grunt suggestedPaths whenever the main model has reliable implementation anchors/i);
-  assert.match(guidance, /omit suggestedPaths rather than guessing stale or uncertain paths/i);
+  assert.match(guidance, /Make every grunt task self-contained/i);
+  assert.match(guidance, /Add targetedContext only for directly applicable snippets or project instructions/i);
+  assert.match(guidance, /Omit uncertain paths or context rather than adding noise/i);
   assert.match(guidance, /main model owns recovery/i);
   assert.match(guidance, /fix small\/local defects.*directly/i);
   assert.match(guidance, /Do not call grunt merely to verify or repair the previous worker/i);

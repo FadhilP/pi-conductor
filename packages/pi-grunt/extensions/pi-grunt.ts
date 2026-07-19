@@ -35,6 +35,17 @@ function usageText(run: WorkerRun): string {
   return `${run.turns} turn${run.turns === 1 ? "" : "s"} · ${u.input} input · ${u.output} output · R${u.cacheRead} · W${u.cacheWrite} · $${u.cost.toFixed(4)} · ${(run.durationMs / 1000).toFixed(1)}s`;
 }
 
+type SessionStats = { runs: number; integrated: number; requiresAttention: number; turns: number; cost: number };
+const emptyStats = (): SessionStats => ({ runs: 0, integrated: 0, requiresAttention: 0, turns: 0, cost: 0 });
+function workerMetrics(run: WorkerRun, workerStatus: string, integrationStatus: string, changedFileCount?: number) {
+  return {
+    workerStatus, integrationStatus, workerCostUsd: run.usage.cost, turns: run.turns,
+    inputTokens: run.usage.input, outputTokens: run.usage.output,
+    cacheReadTokens: run.usage.cacheRead, cacheWriteTokens: run.usage.cacheWrite,
+    ...(changedFileCount === undefined ? {} : { changedFileCount }),
+  };
+}
+
 function isSuggested(path: string, suggestions: readonly string[]): boolean {
   const normalized = path.replace(/\\/g, "/");
   return suggestions.some((item) => {
@@ -49,7 +60,8 @@ function derivedStatus(run: WorkerRun, changedCount: number): string {
   if (run.failure === "timed_out") return changedCount ? "partial" : "timed_out";
   if (run.error) return changedCount ? "partial" : "failed";
   if (/^Status:\s*blocked\b/im.test(run.text)) return changedCount ? "partial" : "blocked";
-  return "completed";
+  if (/^Status:\s*completed\b/im.test(run.text)) return "completed";
+  return changedCount ? "partial" : "failed";
 }
 
 function unavailableDependencies(parentRoot: string, parentCwd: string, workerRoot: string, workerCwd: string): string[] {
@@ -72,7 +84,15 @@ function unavailableDependencies(parentRoot: string, parentCwd: string, workerRo
 
 export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
   let calls = 0;
+  let stats = emptyStats();
   const sessionPatchArtifacts = new Set<string>();
+  const recordRun = (run: WorkerRun, integrationStatus: string) => {
+    stats.runs++;
+    stats.turns += run.turns;
+    stats.cost += run.usage.cost;
+    if (integrationStatus === "completed") stats.integrated++;
+    else stats.requiresAttention++;
+  };
   const resolveModel = async (ctx: any) => {
     const config = await loadConfig();
     if (!config.model) return ctx.model;
@@ -105,6 +125,7 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
   };
 
   pi.on("session_start", async () => {
+    stats = emptyStats();
     await pruneStalePatchArtifacts();
     await refreshTool();
   });
@@ -124,8 +145,8 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
     description: "Run one synchronous delegated implementation worker using the configured execution mode. Isolated mode is default; direct mode edits the current working directory immediately; dynamic mode chooses based on Git HEAD availability. Calls are unlimited per original user prompt. Main model retains review and final verification.",
     promptSnippet: "Delegate a compact implementation slice or complete non-difficult change to a synchronous worker",
     promptGuidelines: [
-      "Use estimated changed LOC only as a soft routing guide: small is under 50 LOC, medium is 50–400 LOC inclusive, and large is over 400 LOC. Keep small/local work in the main model. Use grunt for medium changes with compact handoffs and easy validation, or large mechanical changes. Large non-mechanical work must be decomposed into coherent sequential slices; prefer roughly 200–300 changed LOC or less per semantic slice. Delegate a whole large change only when behavior is simple and validation is decisive. Reasoning complexity, architectural coupling, handoff compactness, and validation ease override LOC; a tiny security or concurrency change may still be difficult. Main model must own difficult architecture, integration, review, and final verification. Select thinking by reasoning complexity, not diff size. Grunt calls are unlimited per original user prompt, but dependent slices must be sequential: invoke one Grunt, inspect its applied changes, run focused verification, then invoke the next Grunt. Do not issue dependent Grunt calls in one assistant response because the later handoff cannot incorporate earlier results. Before grunt on consequential architecturally coupled work, use advisor at least once when available; use a later advisor call when implementation creates material new uncertainty. In default isolated mode, Grunt applies changes only after successful completion and a stale-parent check; blocked or failed work remains unapplied. Inspect applied or direct changes and run verify after grunt before claiming completion.",
-      "Provide grunt suggestedPaths whenever the main model has reliable implementation anchors from its existing context or repository evidence. Include the narrowest useful files or directories; omit suggestedPaths rather than guessing stale or uncertain paths. Suggested paths guide discovery and scope but are not an allowlist.",
+      "Delegate based on expected main-model effort avoided, not changed LOC alone. Keep diagnosis, architecture, cross-cutting semantic changes, and ordinary semantic changes around 50–300 LOC in the main model. Use grunt mainly for mechanical or repetitive multi-file work, or bounded already-designed slices—typically 300–500+ LOC—when the handoff has exact anchors and decisive checks. Main model owns difficult architecture, integration, review, and final verification. Use medium thinking for mechanical or bounded semantic work, and high only when delegation still clearly saves work. Calls are unlimited per original user prompt, but dependent slices must be sequential: invoke one Grunt, inspect its applied changes, run focused verification, then invoke the next Grunt. Before grunt on consequential architecturally coupled work, use advisor at least once when available. In isolated mode, only completed work passing stale-parent checks is applied.",
+      "Make every grunt task self-contained: name exact files and symbols, chosen design, constraints, non-goals, acceptance criteria, and focused checks. Provide suggestedPaths whenever reliable anchors are known. Add targetedContext only for directly applicable snippets or project instructions such as AGENTS.md rules; never copy broad conversation history. Omit uncertain paths or context rather than adding noise. Suggested paths guide scope but are not an allowlist.",
       "After any grunt result, the main model owns recovery. Inspect completed changes or any partial patch artifact, then fix small/local defects and finish small remaining work directly instead of spawning another worker. Do not call grunt merely to verify or repair the previous worker. Re-delegate only when the remaining work is still medium or large, self-contained, easy to validate, and likely cheaper than main-model completion.",
       "Grunt direct execution, whether configured directly or selected by dynamic mode outside Git, edits the current working directory immediately. It provides no rollback, stale-parent check, changed-path derivation, or protection from partial edits after failure or cancellation.",
     ],
@@ -133,6 +154,8 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
       task: Type.String({ minLength: 1, maxLength: 8000, description: "Self-contained implementation handoff including decisions and acceptance criteria" }),
       thinking: StringEnum(thinkingLevels, { description: "Worker thinking effort selected by the main model" }),
       suggestedPaths: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { maxItems: 40, uniqueItems: true, description: "Scope guidance, not an allowlist" })),
+      targetedContext: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Directly applicable code snippets or project instructions; never broad transcript context" })),
+      checkCommands: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { maxItems: 8, uniqueItems: true, description: "Focused existing checks useful for this task" })),
     }, { additionalProperties: false }),
     executionMode: "sequential",
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -167,17 +190,19 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
       const entries = contextChars ? ctx.sessionManager?.buildContextEntries?.() ?? ctx.sessionManager?.getBranch?.() ?? [] : [];
       const parentContext = contextChars ? buildWorkerContext(entries, contextChars) : "";
       const suggested = params.suggestedPaths ?? [];
+      const targetedContext = params.targetedContext?.trim() ?? "";
+      const checkCommands = params.checkCommands ?? [];
       const missingDependencies = isolated
         ? unavailableDependencies(isolated.parentRoot, isolated.parentCwd, isolated.workerRoot, isolated.workerCwd)
         : [];
       const dependencyNote = missingDependencies.length
         ? `\n\nUnavailable ignored dependency directories: ${missingDependencies.join(", ")}. Do not install dependencies; skip checks requiring them and report that limitation.`
         : "";
-      const prompt = `Implementation task:\n${task}${suggested.length ? `\n\nSuggested paths (guidance only):\n${suggested.map((path) => `- ${path}`).join("\n")}` : ""}${dependencyNote}${parentContext ? `\n\nBounded redacted parent context (background only; task above is authoritative):\n${parentContext}` : ""}`;
+      const prompt = `Implementation task:\n${task}${targetedContext ? `\n\nTargeted context (directly applicable background only):\n${targetedContext}` : ""}${suggested.length ? `\n\nSuggested paths (guidance only):\n${suggested.map((path) => `- ${path}`).join("\n")}` : ""}${checkCommands.length ? `\n\nFocused checks:\n${checkCommands.map((command) => `- ${command}`).join("\n")}` : ""}${dependencyNote}${parentContext ? `\n\nBounded redacted parent context (background only; task above is authoritative):\n${parentContext}` : ""}`;
       const args = [
         "--mode", "json", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files",
         "--tools", "read,grep,find,ls,edit,write,bash", "--model", modelName(model), "--thinking", params.thinking,
-        "--append-system-prompt", mode === "isolated" ? WORKER_PROMPT : DIRECT_WORKER_PROMPT, prompt,
+        "--system-prompt", mode === "isolated" ? WORKER_PROMPT : DIRECT_WORKER_PROMPT, prompt,
       ];
       const runningText = mode === "isolated" ? "implementing in isolation" : "DIRECT — editing current working directory";
       if (ctx.hasUI) ctx.ui.setStatus("pi-grunt", `grunt: ${runningText}…`);
@@ -205,6 +230,7 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
         if (!isolated) {
           const status = derivedStatus(run, 0);
           const recovery = status !== "completed";
+          recordRun(run, status);
           const lines = [
             `Worker status: ${status}.`,
             "Execution mode: DIRECT; worker edits affected the current working directory immediately.",
@@ -217,15 +243,16 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
             content: [{ type: "text" as const, text: lines.join("\n") }],
             details: {
               status, mode, configuredMode, isolationFallback, isolated: false, workerCwd: run.cwd,
-              ...(recovery ? { task, suggestedPaths: suggested } : {}),
+              ...(recovery ? { task, suggestedPaths: suggested, targetedContext, checkCommands } : {}),
               model: modelName(model), thinking: params.thinking, durationMs: run.durationMs,
-              usage: run.usage, turns: run.turns, activity: run.activity, stopReason: run.stopReason,
+              usage: run.usage, metrics: workerMetrics(run, status, status), turns: run.turns, activity: run.activity, stopReason: run.stopReason,
               truncated: run.truncated, stderr: run.stderr, failureCode: run.failure,
             },
           };
         }
         const worker = await collectWorkerPatch(exec, isolated);
-        let status = derivedStatus(run, worker.changedPaths.length);
+        const workerStatus = derivedStatus(run, worker.changedPaths.length);
+        let status = workerStatus;
         let applied = false;
         let artifactPath: string | undefined;
         let failureCode: string | undefined = run.failure;
@@ -259,6 +286,7 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
         const outsideSuggestedPaths = suggested.length ? worker.changedPaths.filter((path) => !isSuggested(suggestionPath(path), suggested)) : [];
         const preExistingDirtyTouched = worker.changedPaths.filter((path) => isolated.parentBaseline.paths.has(path));
         const recovery = status !== "completed";
+        recordRun(run, status);
         const lines = [
           `Worker status: ${status}.`,
           `Isolation verified: ${isolated.isolationVerified ? "yes" : "no"}.`,
@@ -276,9 +304,9 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
           details: {
             status, applied, mode, configuredMode, isolated: true, isolationVerified: isolated.isolationVerified,
             workerCwd: run.cwd, workerHead: isolated.workerHead, artifactPath,
-            ...(recovery ? { task, suggestedPaths: suggested, missingDependencies, changedPaths: worker.changedPaths, preExistingDirtyTouched, outsideSuggestedPaths } : {}),
+            ...(recovery ? { task, suggestedPaths: suggested, targetedContext, checkCommands, missingDependencies, changedPaths: worker.changedPaths, preExistingDirtyTouched, outsideSuggestedPaths } : {}),
             model: modelName(model), thinking: params.thinking, durationMs: run.durationMs,
-            usage: run.usage, turns: run.turns, activity: run.activity, stopReason: run.stopReason,
+            usage: run.usage, metrics: workerMetrics(run, workerStatus, status, worker.changedPaths.length), turns: run.turns, activity: run.activity, stopReason: run.stopReason,
             truncated: run.truncated, stderr: run.stderr, failureCode,
           },
         };
@@ -355,7 +383,10 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
         const config = await loadConfig();
         const model = await resolveModel(ctx);
         const state = config.disabled ? "disabled" : !isGruntEnabled(config) ? "inactive" : model ? "active" : "unavailable";
-        ctx.ui.notify(`Model: ${config.model ?? "current main model"}\nState: ${state}\nMode: ${gruntMode(config)}\nThinking: selected by main model per call`, "info"); return;
+        const measured = stats.runs
+          ? `\nSession worker metrics: ${stats.integrated}/${stats.runs} integrated · ${stats.requiresAttention} requiring main attention · ${stats.turns} turns · $${stats.cost.toFixed(4)}`
+          : "\nSession worker metrics: no runs yet";
+        ctx.ui.notify(`Model: ${config.model ?? "current main model"}\nState: ${state}\nMode: ${gruntMode(config)}\nThinking: selected by main model per call${measured}\nNote: metrics exclude main-model handoff, review, repair, and verification cost.`, "info"); return;
       }
       let selected = value;
       if (!selected) {

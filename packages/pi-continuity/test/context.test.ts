@@ -88,6 +88,31 @@ test("context exposes exact todo IDs and status", () => {
   const text = buildContext(w, [], "", 900);
   assert.match(text, /Todo todo_1 \[pending\]: inspect/);
 });
+test("executing context is compact while planning retains approval detail", () => {
+  const executing = fresh("A deliberately concise but active execution goal");
+  setPlan(executing, ["done work", "current work", "next one", "next two", "next three", "omitted later"]);
+  executing.mode = "executing";
+  executing.planSummary = "Anchor packages/pi-continuity/src/context.ts and verify focused tests.";
+  executing.constraints = ["Keep compatibility", "Do not redesign", "This third constraint is omitted"];
+  updateTodo(executing, "todo_1", "done");
+  updateTodo(executing, "todo_2", "in_progress");
+  const compact = buildContext(executing, [], "", 300);
+  assert.match(compact, /Current todo_2 \[in_progress\]: current work/);
+  assert.match(compact, /Todo todo_3 \[pending\]: next one/);
+  assert.match(compact, /Done: 1/);
+  assert.doesNotMatch(compact, /done work/);
+  assert.doesNotMatch(compact, /todo_6/);
+  assert.match(compact, /Plan anchor:/);
+  assert.ok(compact.length <= 1_200);
+
+  const planning = fresh("Review proposal");
+  setPlan(planning, ["Inspect", "Implement", "Test", "Document", "Review"]);
+  planning.planSummary = "Detailed approval approach";
+  const detailed = buildContext(planning, [], "", 300);
+  assert.match(detailed, /Plan: Detailed approval approach/);
+  assert.match(detailed, /Todo todo_5 \[pending\]: Review/);
+});
+
 test("plan refresh preserves todo progress", () => {
   const w = fresh("goal");
   setPlan(w, ["inspect", "fix"], "1");

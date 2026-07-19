@@ -153,7 +153,7 @@ export default function verifyExtension(pi: ExtensionAPI) {
       "Run bounded changed-set hygiene, then detect and run existing project verification commands. Discovers immediate child packages when root declares no checks. Scope changed skips clean Git worktrees; project always runs. Optionally select up to six stable check IDs.",
     promptSnippet: "Run detected project checks and return bounded failures",
     promptGuidelines: [
-      "Use verify after code changes before claiming completion. Call verify in a tool-only assistant turn before writing final user-facing text, then wait for its result and respond once. It runs git diff --check for dirty Git worktrees before declared checks. Use scope changed for normal edits and project for broad refactors or release checks. Verify never installs dependencies.",
+      "Use verify after code changes before claiming completion. Call Verify in a tool-only assistant turn with no user-facing prose, wait for its result, then write exactly one evidence-aware final response. This ordering applies to passing, failed, stale, cancelled, error, clean, and no-check outcomes. It runs git diff --check for dirty Git worktrees before declared checks. Use scope changed for normal edits and project for broad refactors or release checks. Verify never installs dependencies.",
     ],
     parameters: Type.Object(
       {
@@ -162,7 +162,7 @@ export default function verifyExtension(pi: ExtensionAPI) {
       },
       { additionalProperties: false },
     ),
-    async execute(_id, params, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const runId = randomUUID();
       const startedAt = new Date().toISOString();
       const initial = await worktreeState(ctx.cwd, signal);
@@ -302,7 +302,8 @@ export default function verifyExtension(pi: ExtensionAPI) {
         durationMs: Date.now() - runStarted,
         ...(omittedChecks.length ? { omittedChecks } : {}),
         ...(unrunChecks.length ? { unrunChecks } : {}),
-        ...(hygiene ? { hygiene } : {}), results,
+        ...(hygiene ? { hygiene } : {}),
+        results,
       };
       publish(details, ctx.cwd);
       if (ctx.hasUI) ctx.ui.setStatus("pi-verify", `Verify: ${state}`);
@@ -311,8 +312,14 @@ export default function verifyExtension(pi: ExtensionAPI) {
           : state === "stale" ? "Verification stale: worktree changed during checks."
             : state === "error" ? "Verification error."
               : "Verification failed.";
+      const omitted = omittedChecks.length
+        ? ` Skipped by six-check cap (${omittedChecks.length}): ${omittedChecks.join(", ")}. Pass checks to select them explicitly.`
+        : "";
+      const text = state === "passed"
+        ? `${outcome} ${results.length}/${checks.length} checks: ${results.map((result) => result.id).join(", ")} · ${(details.durationMs! / 1000).toFixed(1)}s.${hygiene ? " Hygiene passed." : ""}${omitted}`
+        : `${outcome}${hygiene ? `\n\n${hygieneText(hygiene)}` : ""}\n\n${summary}${unrunChecks.length ? `\n\nNot run after stop: ${unrunChecks.join(", ")}.` : ""}${omittedChecks.length ? `\n\nSkipped by six-check cap: ${omittedChecks.join(", ")}. Pass checks to select them explicitly.` : ""}`;
       return {
-        content: [{ type: "text" as const, text: `${outcome}${hygiene ? `\n\n${hygieneText(hygiene)}` : ""}\n\n${summary}${unrunChecks.length ? `\n\nNot run after stop: ${unrunChecks.join(", ")}.` : ""}${omittedChecks.length ? `\n\nSkipped by six-check cap: ${omittedChecks.join(", ")}. Pass checks to select them explicitly.` : ""}` }],
+        content: [{ type: "text" as const, text }],
         details,
       };
     },

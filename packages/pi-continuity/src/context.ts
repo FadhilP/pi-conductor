@@ -52,15 +52,30 @@ export function buildContext(
   if (work) {
     const remaining = work.todos.filter((todo) => todo.status !== "done");
     const done = work.todos.filter((todo) => todo.status === "done");
-    lines.push(
-      `Work: ${work.mode}; goal: ${work.goal.slice(0, 500)}`,
-      ...remaining.slice(0, 6).map((todo) => `Todo ${todo.id} [${todo.status}]: ${todo.text}`),
-      done.length ? `Done: ${done.map((todo) => todo.id).join(", ")}` : "",
-      work.latestFailure ? `Blocked: ${work.latestFailure}` : "",
-      work.nextAction ? `Next: ${work.nextAction}` : "",
-      ...work.constraints.slice(0, 4).map((x) => `Constraint: ${x}`),
-      work.planSummary ? `Plan: ${work.planSummary.slice(0, 800)}` : "",
-    );
+    if (work.mode === "planning") {
+      // Approval needs the complete proposed shape, rather than an execution-sized summary.
+      lines.push(
+        `Work: planning; goal: ${work.goal.slice(0, 500)}`,
+        work.planSummary ? `Plan: ${work.planSummary.slice(0, 900)}` : "",
+        ...work.constraints.slice(0, 6).map((x) => `Constraint: ${x.slice(0, 220)}`),
+        ...work.todos.map((todo) => `Todo ${todo.id} [${todo.status}]: ${todo.text}`),
+        work.latestFailure ? `Blocked: ${work.latestFailure.slice(0, 300)}` : "",
+        work.nextAction ? `Next: ${work.nextAction.slice(0, 300)}` : "",
+      );
+    } else {
+      const current = work.todos.find((todo) => todo.id === work.currentTodoId);
+      const upcoming = remaining.filter((todo) => todo.id !== current?.id);
+      lines.push(
+        `Work: ${work.mode}; goal: ${work.goal.slice(0, 280)}`,
+        current ? `Current ${current.id} [${current.status}]: ${current.text.slice(0, 160)}` : "",
+        ...upcoming.slice(0, 3).map((todo) => `Todo ${todo.id} [${todo.status}]: ${todo.text.slice(0, 160)}`),
+        done.length ? `Done: ${done.length}` : "",
+        work.latestFailure ? `Blocked: ${work.latestFailure.slice(0, 260)}` : "",
+        work.nextAction ? `Next: ${work.nextAction.slice(0, 260)}` : "",
+        ...work.constraints.slice(0, 2).map((x) => `Constraint: ${x.slice(0, 160)}`),
+        work.planSummary ? `Plan anchor: ${work.planSummary.slice(0, 360)}` : "",
+      );
+    }
   }
   lines.push(
     ...selected.slice(0, 3).map((f) => `Memory ${f.key}: ${f.text}`),

@@ -28,6 +28,14 @@ test("runner submits its prompt and selects final assistant usage", async () => 
   assert.equal(run.contextTokens, 8); assert.equal(run.cacheReadTokens, 3);
 });
 
+test("runner honors a caller-local final report cap", async () => {
+  const child = await fake("scout-report-cap-", `if(command.type==='prompt'){emit(${assistant("x".repeat(30_000))});settled();setInterval(()=>{},1000);}`);
+  const run = await runPi([], { cwd: child.dir, prompt: "x", resultMaxBytes: 12 * 1024, invocation: child.invocation });
+  assert.equal(run.truncated, true);
+  assert.ok(Buffer.byteLength(run.text) <= 12 * 1024);
+  assert.match(run.text, /omitted content/i);
+});
+
 test("context and cache-read sizes remain independent", () => {
   assert.equal(contextTokensFromUsage({ totalTokens: 210_000, cacheRead: 80_000 }), 130_000);
   assert.equal(cacheReadTokensFromUsage({ totalTokens: 210_000, cacheRead: 80_000 }), 80_000);

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import extension from "../extensions/pi-verify.ts";
 
-test("verify guidance keeps verification before final text", () => {
+test("verify guidance requires one post-result response", () => {
   let tool: any;
   extension({
     registerTool: (value: any) => { tool = value; },
@@ -13,8 +13,9 @@ test("verify guidance keeps verification before final text", () => {
   } as any);
   const guidance = tool.promptGuidelines.join("\n");
   assert.match(guidance, /tool-only assistant turn/i);
-  assert.match(guidance, /before writing final user-facing text/i);
-  assert.match(guidance, /wait for its result and respond once/i);
+  assert.match(guidance, /no user-facing prose/i);
+  assert.match(guidance, /exactly one evidence-aware final response/i);
+  assert.doesNotMatch(guidance, /prose first|verification follows below/i);
   const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
   assert.match(tool.renderCall({ scope: "changed" }, theme).render(80).join("\n"), /Verify worktree changes/);
 });
@@ -60,8 +61,9 @@ test("verify publishes bounded result metadata and session entry", async () => {
   assert.equal("output" in entries[0]!.data.results[0], false);
   assert.equal("output" in entries[0]!.data.hygiene, false);
   assert.equal("status" in entries[0]!.data.hygiene, false);
-  assert.match(result.content[0].text, /Changed paths:\n M file\.ts/);
-  assert.doesNotMatch(result.content[0].text, /\nok\n?/);
+  assert.equal(result.terminate, undefined);
+  assert.match(result.content[0].text, /^Verification passed\. 1\/1 checks: npm:test · \d+\.\ds\. Hygiene passed\.$/);
+  assert.doesNotMatch(result.content[0].text, /Changed paths|PASS|npm run test|\nok\n?/);
 
   const injected = handlers.get("context")!({ messages: [] });
   assert.match(injected.messages.at(-1).content, /^Verification: passed;/);
@@ -71,6 +73,77 @@ test("verify publishes bounded result metadata and session entry", async () => {
   }] }), undefined);
   handlers.get("tool_call")!({ toolName: "edit" });
   assert.equal(handlers.get("context")!({ messages: [] }), undefined);
+});
+
+test("Verify never terminates early, even when the assistant emitted prior prose", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-verify-termination-"));
+  await writeFile(join(cwd, "package.json"), JSON.stringify({ scripts: { test: "node test.js" } }));
+  const run = async (
+    kind: "passed" | "clean" | "no_checks" | "failed" | "cancelled" | "stale" | "error" | "invalid",
+    prose = "Implemented the change; verification follows below.",
+  ) => {
+    const caseCwd = kind === "no_checks" ? await mkdtemp(join(tmpdir(), "pi-verify-no-checks-")) : cwd;
+    let heads = 0;
+    let tool: any;
+    extension({
+      registerTool: (value: any) => { tool = value; },
+      on: () => {}, events: { emit: () => {} }, appendEntry: () => {},
+      exec: async (command: string, args: string[]) => {
+        if (command === "git" && args[0] === "rev-parse") {
+          heads++;
+          return kind === "error" ? { code: 1, stdout: "", stderr: "no git" }
+            : { code: 0, stdout: `${kind === "stale" && heads > 1 ? "def" : "abc"}\n`, stderr: "" };
+        }
+        if (command === "git" && args[0] === "status")
+          return { code: 0, stdout: kind === "clean" ? "" : kind === "failed" ? " M file.ts\n" : "", stderr: "" };
+        if (command === "git" && args[0] === "diff")
+          return { code: kind === "failed" ? 1 : 0, stdout: kind === "failed" ? "file.ts: bad whitespace\n" : "", stderr: "" };
+        return { code: kind === "failed" ? 1 : 0, stdout: "", stderr: "" };
+      },
+    } as any);
+    const id = `verify-${kind}`;
+    return tool.execute(id, { scope: kind === "clean" ? "changed" : "project", ...(kind === "invalid" ? { checks: ["missing"] } : {}) }, kind === "cancelled" ? { aborted: true } : undefined, undefined, {
+      cwd: caseCwd, hasUI: false,
+      sessionManager: { getLeafEntry: () => ({ type: "message", message: { role: "assistant", content: [
+        { type: "text", text: prose },
+        { type: "toolCall", id, name: "verify" },
+      ] } }) },
+    });
+  };
+
+  for (const kind of ["passed", "clean", "no_checks", "failed", "cancelled", "stale", "error", "invalid"] as const) {
+    const result = await run(kind);
+    assert.equal(result.terminate, undefined, `${kind} must retain one evidence-aware follow-up`);
+    assert.equal(result.details.terminal, undefined);
+  }
+});
+
+test("tool-only passing Verify remains nonterminal and reports capped check IDs compactly", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-verify-capped-"));
+  await writeFile(join(cwd, "package.json"), JSON.stringify({ scripts: {
+    verify: "node verify.js", check: "node check.js", typecheck: "node types.js", lint: "node lint.js", test: "node test.js",
+  } }));
+  await writeFile(join(cwd, "Makefile"), "verify:\n\ncheck:\n\ntest:\n\nlint:\n");
+  let tool: any;
+  extension({
+    registerTool: (value: any) => { tool = value; },
+    on: () => {}, events: { emit: () => {} }, appendEntry: () => {},
+    exec: async (command: string, args: string[]) => {
+      if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: "abc\n", stderr: "" };
+      if (command === "git") return { code: 0, stdout: "", stderr: "" };
+      return { code: 0, stdout: "verbose successful command output", stderr: "" };
+    },
+  } as any);
+  const result = await tool.execute("tool-only", { scope: "project" }, undefined, undefined, {
+    cwd, hasUI: false,
+    sessionManager: { getLeafEntry: () => ({ type: "message", message: { role: "assistant", content: [
+      { type: "toolCall", id: "tool-only", name: "verify" },
+    ] } }) },
+  });
+  assert.equal(result.terminate, undefined);
+  assert.match(result.content[0].text, /6\/6 checks: npm:verify, npm:check, npm:typecheck, npm:lint, npm:test, make:verify/);
+  assert.match(result.content[0].text, /Skipped by six-check cap \(3\): make:check, make:test, make:lint/);
+  assert.doesNotMatch(result.content[0].text, /PASS|verbose successful command output|Changed paths/);
 });
 
 test("verify reports live elapsed runtime while a check runs", async () => {

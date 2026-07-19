@@ -77,7 +77,7 @@ test("steering preserves the current repo Scout call sequence", () => {
   assert.equal(startsNewRepoSequence({ source: "interactive", streamingBehavior: "followUp" }), true);
 });
 
-test("parallel Repo Scout calls are serialized into fresh child sessions with parent context", async () => {
+test("parallel Repo Scout calls are serialized into fresh child sessions; only follow-ups get parent context", async () => {
   let calls = 0;
   let firstStarted!: () => void;
   let releaseFirst!: () => void;
@@ -85,9 +85,11 @@ test("parallel Repo Scout calls are serialized into fresh child sessions with pa
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const childArgs: string[][] = [];
   const childPrompts: string[] = [];
+  const childOptions: any[] = [];
   const run = async (args: string[], options: any): Promise<ScoutRun> => {
     childArgs.push(args);
     childPrompts.push(options.prompt);
+    childOptions.push(options);
     calls++;
     if (calls === 1) {
       firstStarted();
@@ -112,7 +114,7 @@ test("parallel Repo Scout calls are serialized into fresh child sessions with pa
   try {
     const first = runtime.tools.get("repo_scout").execute("one", { task: "first" }, undefined, undefined, ctx);
     await started;
-    const second = runtime.tools.get("repo_scout").execute("two", { task: "second" }, undefined, undefined, ctx);
+    const second = runtime.tools.get("repo_scout").execute("two", { task: "second", retryReason: "Need prior request context" }, undefined, undefined, ctx);
     releaseFirst();
     const results = await Promise.all([first, second]);
     const sessionDir = (args: string[]) => args[args.indexOf("--session-dir") + 1];
@@ -120,9 +122,16 @@ test("parallel Repo Scout calls are serialized into fresh child sessions with pa
     assert.equal(results[0].details.callNumber, 1);
     assert.equal(results[1].details.callNumber, 2);
     assert.ok(childArgs.every((args) => !args.includes("--continue")));
+    assert.ok(childArgs.every((args) => args.includes("--system-prompt")));
+    assert.ok(childArgs.every((args) => !args.includes("--append-system-prompt")));
+    assert.ok(childArgs.every((args) => args.includes("read,search_excerpt,rg,fd,grep,find,ls")));
+    assert.ok(childOptions.every((options) => options.resultMaxBytes === 12 * 1024));
+    assert.ok(childOptions.every((options) => options.env.PI_SCOUT_CHILD === "1"));
     assert.notEqual(sessionDir(childArgs[0]), sessionDir(childArgs[1]));
     assert.ok(childArgs.every((args) => args.includes("rpc") && !args.some((arg) => arg.includes("Find auth flow"))));
-    assert.ok(childPrompts.every((prompt) => prompt.includes("Find auth flow")));
+    assert.doesNotMatch(childPrompts[0], /Find auth flow/);
+    assert.match(childPrompts[1], /Find auth flow/);
+    assert.match(childPrompts[1], /Prior scout gap requiring follow-up: Need prior request context/);
   } finally { runtime.restore(); }
 });
 
@@ -155,18 +164,14 @@ test("Scout registers separate repo and web tools; Web Scout fails closed withou
   try {
     assert.deepEqual([...runtime.tools.keys()].sort(), ["repo_scout", "web_scout"]);
     const repoGuidance = runtime.tools.get("repo_scout").promptGuidelines.join("\n");
-    assert.match(repoGuidance, /bounded read-only orientation pass/i);
-    assert.match(repoGuidance, /neither the user request nor current context supplies a concrete path/i);
-    assert.match(repoGuidance, /Start the task with concrete reconnaissance work/i);
-    assert.match(repoGuidance, /Omit the broad user goal unless it materially constrains search scope or interpretation/i);
-    assert.match(repoGuidance, /include only the relevant constraint, not the full request/i);
-    assert.match(repoGuidance, /Trace redirectUri from request input through callback validation/i);
-    assert.match(repoGuidance, /sufficient for read-only evaluation by default/i);
-    assert.match(repoGuidance, /do not reread cited source unless an exact edit needs current text/i);
-    assert.match(repoGuidance, /every call receives bounded current parent context/i);
-    assert.match(repoGuidance, /Before any follow-up Scout call, do one bounded parent-side gap pass/i);
-    assert.match(repoGuidance, /do not make serial Scout calls one finding, file, or question at a time/i);
-    assert.match(repoGuidance, /do not call Scout again solely because the user approved implementation/i);
+    assert.match(repoGuidance, /only for non-local understanding/i);
+    assert.match(repoGuidance, /skip a self-contained known-file edit/i);
+    assert.match(repoGuidance, /concrete task/i);
+    assert.match(repoGuidance, /gathers cited evidence, not judgment/i);
+    assert.match(repoGuidance, /Do not duplicate cited rereads/i);
+    assert.match(repoGuidance, /only for a real stated gap/i);
+    assert.match(repoGuidance, /before mutation-capable tools/i);
+    assert.match(repoGuidance, /initial calls receive no parent conversation context/i);
     const result = await runtime.tools.get("web_scout").execute("id", { task: "current docs" }, undefined, undefined, context({ hasUI: false }));
     assert.equal(result.details.failureCode, "confirmation_unavailable");
   } finally { runtime.restore(); }

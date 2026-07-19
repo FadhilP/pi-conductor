@@ -35,17 +35,25 @@ Workers have a fixed 262,144-token reported-context limit. After each assistant 
 
 ## Routing
 
-Use estimated changed LOC only as a soft guide:
+Route by expected main-model effort avoided, not changed LOC alone.
 
-- Small: under 50 LOC. Main model usually implements directly.
-- Medium: 50–400 LOC inclusive. Grunt is a good fit when handoff stays compact and validation is easy.
-- Large: over 400 LOC. One Grunt call is appropriate for mechanical work.
-- Large non-mechanical change: decompose it into coherent sequential slices, preferably about 200–300 changed LOC or less per semantic slice. Delegate the whole change only when behavior is simple and validation is decisive.
-- Deep architectural change: main model owns architecture. Grunt may implement bounded, non-difficult slices.
+Keep these in the main model:
 
-Reasoning complexity, architectural coupling, handoff compactness, and validation ease override LOC. A tiny security or concurrency change may still be difficult.
+- Diagnosis and bug investigation.
+- Architecture, public API, security, concurrency, or cross-cutting semantic decisions.
+- Ordinary semantic changes around 50–300 LOC where a fresh worker would repeat discovery.
+- Any task whose handoff cannot name exact anchors and decisive checks.
 
-Provide `suggestedPaths` whenever the main model has reliable implementation anchors from its existing context or repository evidence. Use the narrowest useful files or directories. Omit paths rather than guessing stale or uncertain locations; they guide discovery and scope but are not an allowlist.
+Use Grunt mainly for:
+
+- Mechanical or repetitive multi-file work.
+- Bounded, already-designed implementation slices with exact files and symbols.
+- Changes typically around 300–500+ LOC where worker execution displaces substantial main-model work.
+- Work with focused validation and little expected repair.
+
+Every handoff should name exact files and symbols, chosen design, constraints, non-goals, acceptance criteria, and focused checks. Provide `suggestedPaths` whenever reliable anchors are known. Use `targetedContext` only for directly applicable snippets or project instructions such as relevant `AGENTS.md` rules. Never copy broad conversation history. Omit uncertain paths or context rather than adding noise. Suggested paths guide scope but are not an allowlist.
+
+The main model selects `medium` for mechanical or bounded semantic work and `high` only when delegation still clearly saves work.
 
 Grunt calls are unlimited per original user prompt. Dependent slices remain sequential: invoke Grunt for one slice, inspect its applied changes, run focused verification, then invoke Grunt for the next slice. Do not issue dependent calls in one assistant response because later handoffs cannot incorporate earlier results.
 
@@ -55,7 +63,7 @@ After any Grunt result, the main model owns recovery. It should inspect complete
 
 ## Behavior
 
-`grunt({ task, thinking, suggestedPaths? })` starts one synchronous child Pi process. The child receives the built-in `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash` tools. Optional parent context is bounded and redacted. `suggestedPaths` guides scope but is not an allowlist.
+`grunt({ task, thinking, suggestedPaths?, targetedContext?, checkCommands? })` starts one synchronous child Pi process. `targetedContext` is capped at 4,000 characters; `checkCommands` accepts up to eight focused existing checks. The child receives the built-in `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash` tools. Optional parent context is bounded and redacted. `suggestedPaths` guides scope but is not an allowlist.
 
 In isolated mode, Grunt requires a Git repository with a `HEAD` commit. It creates a detached temporary worktree, then mirrors only dirty/deleted tracked paths and non-ignored untracked paths because Git already checked out clean tracked files. Checkout and baseline-commit hooks are disabled. After normal completion, Grunt derives a binary patch against the immutable baseline commit, verifies that the parent's `HEAD` and dirty-file fingerprints remain unchanged, rechecks immediately before integration, then applies the patch. Worker commits remain included. Successful results omit changed-path and worker-report duplication; the main model inspects authoritative Git state. Non-completed results retain changed paths, scope diagnostics, and the worker report for recovery. Isolation setup failures throw tool errors, so Pi marks them as errors in the TUI.
 
@@ -69,9 +77,11 @@ Ignored dependency directories such as `node_modules`, `.venv`, and `venv` are n
 
 The worker receives:
 
-- Grunt's fixed worker system instructions.
+- Grunt's concise replacement system prompt; Pi's general default system prompt is not appended.
 - The exact `task` handoff.
+- Optional `targetedContext`, for directly applicable snippets or project instructions only.
 - Optional `suggestedPaths`, explicitly marked as guidance rather than an allowlist.
+- Optional focused `checkCommands`.
 - A note listing detected ignored dependency directories unavailable in the worktree.
 - Optional redacted parent conversation context when `PI_GRUNT_PARENT_CONTEXT_CHARS` is greater than `0`. This uses at most the latest 10 user/assistant text or summary entries, caps each at 1,200 characters, removes tool payloads, applies pattern-based secret redaction, then enforces the configured total character limit.
 - Tool results generated after the worker chooses to inspect or execute something.
@@ -86,6 +96,6 @@ In isolated mode, Grunt resolves the temporary worktree's Git top-level and veri
 
 Blocked, aborted, timed-out, budget-limited, output-limited, failed, stale, or unapplicable work never changes the parent worktree. Only a normal model `stop` can integrate changes. When isolated edits exist, Grunt stores their unapplied patch under the Pi agent directory and reports its path. Successful patches are applied only after the stale-parent checks. Same-repository transactions are queued through cleanup; independent repositories may run independently. Cleanup failures are warnings and never disguise an already-applied result.
 
-Timeout, turn, reported-cost, and reported-context limits bound runaway workers. Token, turn, and cost limits are checked after each paid model response, so they prevent another turn rather than undoing cost already incurred. The main model must inspect applied changes and run final verification before completion.
+Timeout, turn, reported-cost, and reported-context limits bound runaway workers. Token, turn, and cost limits are checked after each paid model response, so they prevent another turn rather than undoing cost already incurred. Per-run details separate worker outcome from integration outcome and report worker tokens, cache usage, turns, cost, and changed-file count when isolation provides it. `/grunt status` aggregates session worker runs, integrations, attention-required outcomes, turns, and cost. These metrics intentionally exclude main-model handoff, review, repair, and verification cost; measure those from the parent session when comparing end-to-end effectiveness. The main model must inspect applied changes and run final verification before completion.
 
 Worktree isolation protects the parent repository from ordinary worker edits; it is not a security sandbox. Pi extensions and child tools run with user permissions. Review package source before installation. Task/context text is sent to the selected model provider under that provider's terms and pricing.

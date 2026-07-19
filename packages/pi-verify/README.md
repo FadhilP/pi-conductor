@@ -18,9 +18,11 @@ verify({ scope: "changed" | "project", checks?: string[] })
 
 Use Verify after edits and before completion. `changed` skips verification when Git reports a clean worktree. `project` always runs detected checks. Child-package commands run inside their package directory.
 
+Call Verify in a tool-only assistant turn with no user-facing prose. Wait for its result, then write exactly one evidence-aware final response. This single ordering applies to passing and non-passing outcomes, preventing an early summary from being repeated after a failure.
+
 ## How It Works
 
-Verify first runs bounded changed-set hygiene with `git diff --check HEAD --` for dirty Git worktrees and reports bounded `git status --short` data for untracked-file visibility. It broadly detects declared, configured, explicitly targeted, or standardized lifecycle checks: npm, Composer, and Deno scripts/tasks; Python Ruff, Mypy, Pytest, Tox, and Nox; Rust, Go, Maven, credible JVM Gradle projects, .NET, Make, Just, Ruby Rake, Dart/Flutter, and Haskell; plus Elixir, Swift, Scala, OCaml, Clojure, Gleam, Crystal, Nix, Erlang, and Zig project files. Maven and Gradle wrappers are preferred when available.
+Verify first runs bounded changed-set hygiene with `git diff --check HEAD --` for dirty Git worktrees and reports bounded `git status --short` data for untracked-file visibility. Successful model output is compact (state, check IDs/count, duration, hygiene marker, and any capped IDs); full bounded diagnostics remain available for failures, metadata, session entries, and expanded TUI rendering. It broadly detects declared, configured, explicitly targeted, or standardized lifecycle checks: npm, Composer, and Deno scripts/tasks; Python Ruff, Mypy, Pytest, Tox, and Nox; Rust, Go, Maven, credible JVM Gradle projects, .NET, Make, Just, Ruby Rake, Dart/Flutter, and Haskell; plus Elixir, Swift, Scala, OCaml, Clojure, Gleam, Crystal, Nix, Erlang, and Zig project files. Maven and Gradle wrappers are preferred when available.
 
 When the root declares no checks, immediate non-hidden source directories are checked with the same detection rules in stable name order; common generated and vendor directories are skipped, and discovery never recurses. At most six checks run sequentially; omitted check IDs are reported. Pass up to six IDs through `checks` for explicit selection. Each check has a five-minute timeout. Execution stops on first failure. Hygiene output is capped at 80 lines or 8 KiB; check output keeps 160 lines or 12 KiB.
 

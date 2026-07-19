@@ -101,6 +101,8 @@ export type RunPiOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
   maxCostUsd?: number;
+  /** Optional caller-local final-report cap; defaults to the general result cap. */
+  resultMaxBytes?: number;
   invocation?: Invocation;
   env?: NodeJS.ProcessEnv;
   inheritEnv?: boolean;
@@ -264,7 +266,7 @@ async function runPiUnlocked(args: string[], options: RunPiOptions): Promise<Sco
   }), emptyUsage());
   const final = finalizationMessage ?? messages.at(-1);
   const rawText = final?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n") ?? "";
-  const capped = capText(rawText);
+  const capped = capText(rawText, options.resultMaxBytes);
   const incompleteFinalization = agentSettled && finalizationAttempted && !finalizationSucceeded;
   const budgetFailure = finalizationFailed || incompleteFinalization;
   const error = protocolOverflow

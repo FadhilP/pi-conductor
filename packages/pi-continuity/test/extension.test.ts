@@ -82,8 +82,16 @@ test("continuity and memory guidance stay dedicated", () => {
   const guidance = continuity.promptGuidelines.join("\n");
   const memoryGuidance = memory.promptGuidelines.join("\n");
   assert.match(continuity.promptSnippet, /planning.*todo\/state.*clarification/i);
-  assert.match(guidance, /tool-only assistant turns/i);
-  assert.match(guidance, /final user-facing response with no tool calls/i);
+  assert.match(guidance, /set_plan selectively/i);
+  assert.match(guidance, /Straightforward read-only work and one-shot local fixes may skip it/i);
+  assert.match(guidance, /2–4 outcome-level todos/i);
+  assert.match(guidance, /Nonterminal todo updates may be alongside the next independent useful tool/i);
+  assert.match(guidance, /Verification is a gate, not a separate todo by default/i);
+  assert.match(guidance, /bulk-complete implementation todos/i);
+  assert.match(guidance, /tool-only assistant turn/i);
+  assert.match(guidance, /no user-facing prose/i);
+  assert.match(guidance, /exactly one evidence-aware final response/i);
+  assert.doesNotMatch(guidance, /verification follows below/i);
   assert.match(guidance, /Continuity completes automatically/i);
   assert.match(guidance, /skip Verify for read-only work/i);
   assert.match(guidance, /blocking user decision/i);
@@ -98,6 +106,7 @@ test("continuity and memory guidance stay dedicated", () => {
   assert.deepEqual(continuity.parameters.properties.action.enum, ["clarify", "set_plan", "todo", "state"]);
   for (const field of ["key", "kind", "text", "source", "confidence", "scope", "evidencePaths"])
     assert.equal(continuity.parameters.properties[field], undefined);
+  assert.equal(continuity.parameters.properties.todoIds.maxItems, 12);
   assert.equal(memory.label, "Memory");
   assert.equal(memory.executionMode, "sequential");
   assert.match(JSON.stringify(memory.parameters), /list.*add.*replace.*remove/);
@@ -227,6 +236,34 @@ test("automatic completion waits for required verification", async () => {
     blocked = await tool.execute("complete", { action: "state", completion: true }, undefined, undefined, ctx);
     assert.match(blocked.content[0].text, /already completed/i);
     assert.equal(blocked.terminate, true);
+  } finally {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+  }
+});
+
+test("settlement waits for the single post-Verify final response", async () => {
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const root = await mkdtemp(join(tmpdir(), "continuity-extension-verify-response-"));
+  const cwd = join(root, "repo");
+  await mkdir(cwd);
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  const ctx: any = {
+    cwd, hasUI: false, mode: "json",
+    sessionManager: { getSessionId: () => "verify-response", getEntries: () => [] },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  };
+  try {
+    const app = runtime();
+    for (const handler of app.handlers.get("session_start") ?? []) await handler({}, ctx);
+    const tool = app.tools.get("continuity_update");
+    await tool.execute("plan", { action: "set_plan", goal: "Ship", todos: ["Implement"] }, undefined, undefined, ctx);
+    for (const handler of app.handlers.get("tool_call") ?? []) await handler({ toolName: "edit", input: {} }, ctx);
+    await tool.execute("done", { action: "todo", todoId: "todo_1", status: "done" }, undefined, undefined, ctx);
+    app.emit("pi-verify:result", { version: 1, cwd, state: "passed", runId: "passed", results: [] });
+    await app.handlers.get("agent_settled")?.[0]?.({}, ctx);
+    const completed = await tool.execute("complete", { action: "state", completion: true }, undefined, undefined, ctx);
+    assert.match(completed.content[0].text, /^Work completed/);
   } finally {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
@@ -403,7 +440,7 @@ test("set_plan creates executing todos without explicit plan mode", async () => 
     assert.equal(result.details, undefined);
     const context = await app.handlers.get("context")?.[0]({ messages: [] }, ctx);
     assert.match(context.messages.at(-1).content, /Work: executing/);
-    assert.match(context.messages.at(-1).content, /Todo todo_1 \[in_progress\]: Implement/);
+    assert.match(context.messages.at(-1).content, /Current todo_1 \[in_progress\]: Implement/);
     assert.match(context.messages.at(-1).content, /Todo todo_2 \[pending\]: Verify/);
 
     const advanced = await app.tools.get("continuity_update").execute(
@@ -416,8 +453,64 @@ test("set_plan creates executing todos without explicit plan mode", async () => 
     );
     assert.match(advanced.content[0].text, /state updated/i);
     const advancedContext = await app.handlers.get("context")?.[0]({ messages: [] }, ctx);
-    assert.match(advancedContext.messages.at(-1).content, /Todo todo_2 \[in_progress\]: Verify/);
-    assert.match(advancedContext.messages.at(-1).content, /Done: todo_1/);
+    assert.match(advancedContext.messages.at(-1).content, /Current todo_2 \[in_progress\]: Verify/);
+    assert.match(advancedContext.messages.at(-1).content, /Done: 1/);
+  } finally {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+  }
+});
+
+test("bulk todo completion is atomic and preserves the single-todo API", async () => {
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const root = await mkdtemp(join(tmpdir(), "continuity-extension-bulk-todos-"));
+  const cwd = join(root, "repo");
+  await mkdir(cwd);
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  const ctx: any = {
+    cwd, hasUI: false, mode: "json",
+    sessionManager: { getSessionId: () => "bulk-todos-session", getEntries: () => [] },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  };
+  try {
+    const app = runtime();
+    for (const handler of app.handlers.get("session_start") ?? []) await handler({}, ctx);
+    const tool = app.tools.get("continuity_update");
+    await tool.execute("plan", {
+      action: "set_plan", goal: "Ship", todos: ["Inspect", "Implement", "Verify"],
+    }, undefined, undefined, ctx);
+
+    const snapshot = async () => (await app.handlers.get("context")?.[0]({ messages: [] }, ctx))
+      .messages.at(-1).content;
+    const before = await snapshot();
+    for (const invalid of [
+      { action: "todo", todoIds: ["todo_1", "todo_1"], status: "done" },
+      { action: "todo", todoIds: ["todo_1", "missing"], status: "done" },
+      { action: "todo", todoIds: ["todo_1"], status: "in_progress" },
+      { action: "todo", todoIds: ["todo_2"], status: "done", nextTodoId: "todo_1" },
+      { action: "todo", todoIds: ["todo_1", "todo_2"], status: "done", nextTodoId: "todo_2" },
+    ]) {
+      const rejected = await tool.execute("invalid", invalid, undefined, undefined, ctx);
+      assert.match(rejected.content[0].text, /Unknown or invalid todo transition/);
+      assert.equal(await snapshot(), before, "failed bulk validation must not mutate work");
+    }
+
+    const completed = await tool.execute("bulk", {
+      action: "todo", todoIds: ["todo_1", "todo_2"], status: "done", nextTodoId: "todo_3",
+      latestFailure: "", nextAction: "Verify the result",
+    }, undefined, undefined, ctx);
+    assert.match(completed.content[0].text, /state updated/i);
+    const after = await snapshot();
+    assert.match(after, /Current todo_3 \[in_progress\]: Verify/);
+    assert.match(after, /Done: 2/);
+    assert.match(after, /Next: Verify the result/);
+
+    // Existing callers retain the single todoId transition shape.
+    const single = await tool.execute("single", {
+      action: "todo", todoId: "todo_3", status: "done",
+    }, undefined, undefined, ctx);
+    assert.match(single.content[0].text, /state updated/i);
+    assert.match(await snapshot(), /Done: 3/);
   } finally {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
@@ -875,7 +968,7 @@ test("child reload preserves progress instead of replaying the handoff snapshot"
 
     assert.equal(app.modelSelections(), 1);
     const context = await app.handlers.get("context")![0]({ messages: [] }, ctx);
-    assert.match(context.messages.at(-1).content, /Done: todo_1/);
+    assert.match(context.messages.at(-1).content, /Done: 1/);
   } finally {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
@@ -1117,7 +1210,7 @@ test("approval survives a clarification turn and normalizes missing plan summary
     assert.ok(app.active().includes("edit"));
     assert.ok(app.sent.includes("Execute approved stored plan in current session. Track and verify todos."));
     const context = await app.handlers.get("context")?.[0]({ messages: [] }, ctx);
-    assert.match(context.messages.at(-1).content, /Plan: Implement; Verify/);
+    assert.match(context.messages.at(-1).content, /Plan anchor: Implement; Verify/);
   } finally {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;

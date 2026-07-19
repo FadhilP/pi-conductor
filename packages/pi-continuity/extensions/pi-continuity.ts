@@ -397,6 +397,13 @@ export default function continuityExtension(pi: ExtensionAPI) {
     refresh(ctx);
     return true;
   };
+  const readyForAutomaticCompletion = () =>
+    !!work &&
+    work.mode === "executing" &&
+    !awaitingClarificationProse &&
+    !hasRemainingTodos(work) &&
+    !needsVerification &&
+    latestVerification?.state !== "failed";
   const disposeVerify = pi.events.on("pi-verify:result", (event: any) => {
     if (event?.version !== 1 || event.cwd !== currentCwd) return;
     latestVerification = event;
@@ -525,10 +532,7 @@ export default function continuityExtension(pi: ExtensionAPI) {
     if (
       message.role !== "assistant" ||
       message.stopReason !== "stop" ||
-      work?.mode !== "executing" ||
-      awaitingClarificationProse ||
-      hasRemainingTodos(work) ||
-      needsVerification ||
+      !readyForAutomaticCompletion() ||
       !Array.isArray(message.content) ||
       message.content.some((part: any) => part?.type === "toolCall") ||
       !message.content.some((part: any) => part?.type === "text" && part.text.trim())
@@ -611,7 +615,9 @@ export default function continuityExtension(pi: ExtensionAPI) {
       };
   });
   pi.on("context", (event) => {
-    const text = buildContext(activeWork(), [], lastPrompt, 450);
+    const active = activeWork();
+    // Execution gets a smaller resume payload; proposed plans retain approval detail.
+    const text = buildContext(active, [], lastPrompt, active?.mode === "planning" ? 450 : 300);
     if (text)
       return {
         messages: [
@@ -751,7 +757,9 @@ export default function continuityExtension(pi: ExtensionAPI) {
     promptSnippet: "Planning, todo/state tracking, and clarification capability.",
     executionMode: "sequential",
     promptGuidelines: [
-      "For every non-trivial multi-step task, call continuity_update set_plan with brief todos before execution even when user did not invoke /plan; this creates an executing task list, starts its first todo, and does not activate the planning gate. During explicit planning use clarify only for unresolved user decisions, then set_plan. Clarification questions must ask one concrete decision in plain language, explain why the answer matters in one short sentence when needed, and avoid vague prompts such as 'What do you prefer?'. Use short distinct option labels; descriptions state the practical outcome or tradeoff. Put the recommended option first and say why in its description. Do not ask questions answerable from repository evidence or safe defaults. During explicit planning, Continuity owns plan presentation: populate goal, planSummary as the approach, constraints, and ordered todos; do not invent a separate plan format. Outside explicit planning, set_plan creates an internal execution task list only; do not present it to the user as a structured plan. When planning used Scout, put compact actionable anchors in planSummary: relevant paths, symbols, line ranges, assumptions, and unresolved gaps; do not copy the raw Scout report. During execution, use clarify only for a new blocking user decision that cannot be safely inferred, only as the sole tool call at a safe checkpoint; prefer asking before mutation, stabilize any atomic operation first, and never re-ask an answered question without new evidence. During execution, use exact todo IDs from Continuity context. Complete current work and start the next todo atomically by passing nextTodoId with status done; omit nextTodoId for the final todo. Mark mutation work done immediately after verification. Skip Verify for read-only work. Run Verify and all nonterminal continuity updates in tool-only assistant turns before the final response. Once every todo is done and verification has passed when required, write the final user-facing response with no tool calls; Continuity completes automatically. Do not call tools after final text. Keep completion true for explicit allowUnverified fallback or compatibility only; it still requires preceding response text. Record concise failures/next action.",
+      "Use continuity_update set_plan selectively for explicit /plan, risky or long multi-phase work, handoffs/background jobs, or likely blockers. Straightforward read-only work and one-shot local fixes may skip it. Prefer 2–4 outcome-level todos. Batch set_plan with first independent reads when safe. During explicit planning, Continuity owns plan presentation; set goal, constraints, todos, and put compact actionable anchors in planSummary. Outside explicit planning it creates an internal execution task list only.",
+      "Ask clarification only for a blocking user decision: one concrete decision in plain language, recommended option first, as sole tool call at a safe checkpoint. Never re-ask an answered question without new evidence. Use exact todo IDs. todoIds bulk-completes independent todos; nextTodoId atomically starts one pending todo. Nonterminal todo updates may be alongside the next independent useful tool when ordering is safe.",
+      "Verification is a gate, not a separate todo by default: bulk-complete implementation todos first; skip Verify for read-only work. Run Verify in a tool-only assistant turn with no user-facing prose, wait for its result, then write exactly one evidence-aware final response. Continuity completes automatically after all todos and verification gates clear. Use completion only for allowUnverified fallback or compatibility.",
     ],
     renderShell: "self",
     renderCall: () => new Container(),
@@ -807,6 +815,13 @@ export default function continuityExtension(pi: ExtensionAPI) {
           Type.String({
             description:
               "Exact todo ID shown in Continuity context, such as todo_1",
+          }),
+        ),
+        todoIds: Type.Optional(
+          Type.Array(Type.String(), {
+            minItems: 1,
+            maxItems: 12,
+            description: "Complete these independent todo IDs together. Bulk updates only support status done.",
           }),
         ),
         nextTodoId: Type.Optional(
@@ -946,25 +961,49 @@ export default function continuityExtension(pi: ExtensionAPI) {
       if (!work)
         return { content: [{ type: "text", text: "No active work." }] };
       if (p.action === "todo") {
-        const todo = p.todoId && work.todos.find((item) => item.id === p.todoId),
-          next = p.nextTodoId && work.todos.find((item) => item.id === p.nextTodoId);
-        if (!todo || !p.status || (p.nextTodoId && (
-          p.status !== "done" ||
-          !next ||
-          next.id === todo.id ||
-          next.status !== "pending"
-        )))
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Unknown or invalid todo transition. Valid IDs: ${work.todos.map((t) => t.id).join(", ") || "none"}.`,
-              },
-            ],
+        const bulkIds = p.todoIds;
+        const validIds = work.todos.map((todo) => todo.id).join(", ") || "none";
+        // Validate every participant before changing work so rejected bulk calls are atomic.
+        if (bulkIds) {
+          const ids = new Set(bulkIds);
+          const completed = bulkIds.map((id) => work!.todos.find((item) => item.id === id));
+          const next = p.nextTodoId && work.todos.find((item) => item.id === p.nextTodoId);
+          if (
+            p.todoId !== undefined ||
+            p.status !== "done" ||
+            !bulkIds.length ||
+            ids.size !== bulkIds.length ||
+            completed.some((todo) => !todo) ||
+            (p.nextTodoId !== undefined && (
+              !next || ids.has(p.nextTodoId) || next.status !== "pending"
+            ))
+          ) return {
+            content: [{
+              type: "text",
+              text: `Unknown or invalid todo transition. Valid IDs: ${validIds}.`,
+            }],
           };
-        const now = new Date().toISOString();
-        updateTodo(work, todo.id, p.status, now);
-        if (next) updateTodo(work, next.id, "in_progress", now);
+          const now = new Date().toISOString();
+          for (const id of bulkIds) updateTodo(work, id, "done", now);
+          if (next) updateTodo(work, next.id, "in_progress", now);
+        } else {
+          const todo = p.todoId && work.todos.find((item) => item.id === p.todoId),
+            next = p.nextTodoId && work.todos.find((item) => item.id === p.nextTodoId);
+          if (!todo || !p.status || (p.nextTodoId && (
+            p.status !== "done" ||
+            !next ||
+            next.id === todo.id ||
+            next.status !== "pending"
+          ))) return {
+            content: [{
+              text: `Unknown or invalid todo transition. Valid IDs: ${validIds}.`,
+              type: "text",
+            }],
+          };
+          const now = new Date().toISOString();
+          updateTodo(work, todo.id, p.status, now);
+          if (next) updateTodo(work, next.id, "in_progress", now);
+        }
         if (p.latestFailure !== undefined) work.latestFailure = p.latestFailure;
         if (p.nextAction !== undefined) work.nextAction = p.nextAction;
       } else if (p.action === "state") {
