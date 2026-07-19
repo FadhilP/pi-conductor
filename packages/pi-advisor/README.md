@@ -26,9 +26,9 @@ Selecting or resetting to a model consents to sending that model and provider a 
 
 ## Usage
 
-The executor may complete at most three authenticated `advisor({ request, evidence?: [{ path, start, end }] })` consultations per original prompt. Unavailable model or credential checks do not consume quota.
+The executor may make at most three authenticated `advisor({ request, evidence?: [{ path, start, end }] })` attempts per original prompt. Unavailable model or credential checks do not consume quota.
 
-Use the first call after focused reads or Scout establish evidence, before a consequential non-local decision. Use a second when implementation, competing evidence, or review changes that decision. Reserve the third for material new evidence, contradictions, or test failures that leave the decision unresolved. Skip trivial edits and short Q&A.
+Use two consultations by default for consequential work: cross-module behavior, architecture or API changes, migrations, security or privacy, data-loss risk, or broad regression risk. Make the first call after focused reads or Scout establish evidence, before choosing an approach. Make the second after implementation and before final verification, using substantive new evidence such as changed ranges, key decisions, or preliminary test results; do not repeat the first request ceremonially. Reserve the third for material contradictions, failures, or unresolved risks. Skip trivial or local work.
 
 Evidence is limited to five workspace-relative regular text files, 200 lines per range, 400 lines and 32 KiB total. `.git`, traversal, binary files, and files over 1 MiB are rejected nonfatally. Scout gathers evidence; the main model makes the initial and final judgments. Advisor has no tools and cannot inspect or mutate files.
 

@@ -54,6 +54,13 @@ test("parallel Advisor calls serialize and report running duration", async () =>
     getActiveTools: () => [],
     setActiveTools: () => {},
   } as any, complete as any);
+  const guidance = tool.promptGuidelines.join("\n");
+  assert.match(tool.description, /Maximum three authenticated attempts/);
+  assert.match(guidance, /two advisor consultations by default for consequential work/);
+  assert.match(guidance, /Skip trivial or local work/);
+  assert.match(guidance, /after implementation and before final verification/);
+  assert.match(guidance, /do not repeat the first request ceremonially/);
+  assert.match(guidance, /Third call: reserve for material contradictions, failures, or unresolved risks/);
   const model = { provider: "test", id: "model", contextWindow: 32_000 };
   const ctx = {
     cwd: process.cwd(), hasUI: false, getSystemPrompt: () => "system",

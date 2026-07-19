@@ -129,11 +129,11 @@ export default function advisorExtension(pi: ExtensionAPI, completeAdvisor = com
     name: "advisor",
     label: "Advisor",
     description:
-      "Send configured tool-free strategic advisor a concrete request using a redacted bounded snapshot of current executor context plus optional high-priority workspace file ranges. Maximum three calls per original user prompt.",
+      "Send configured tool-free strategic advisor a concrete request using a redacted bounded snapshot of current executor context plus optional high-priority workspace file ranges. Maximum three authenticated attempts per original user prompt; unavailable model or credential checks do not consume quota.",
     promptSnippet:
       "Consult selected strategic model for difficult planning, review, or failure recovery",
     promptGuidelines: [
-      "Use advisor for consequential non-local decisions, difficult planning, review, or failure recovery; skip trivial, local, or single-turn work. State a concrete request naming the decision, risk, or approach to review. First call: after focused reads or repo_scout establish evidence, before choosing an approach. Second call: use when implementation, competing evidence, or review changes the decision; do not wait for completion. Third call: reserve for material new evidence, contradictions, or test/failure results that leave the decision unresolved. Pass only highest-priority cited file ranges through evidence so Advisor can inspect primary source. Advisor critiques evidence, reasoning, risks, and proposed direction; Scout gathers evidence, main model owns the final decision. Advisor recommends; verify evidence and perform tools yourself.",
+      "Use two advisor consultations by default for consequential work: cross-module behavior, architecture or API changes, migrations, security or privacy, data-loss risk, or broad regression risk. Skip trivial or local work. First call: after focused reads or repo_scout establish evidence, before choosing an approach. Second call: after implementation and before final verification, using substantive new evidence such as changed ranges, key decisions, or preliminary test results; do not repeat the first request ceremonially. Third call: reserve for material contradictions, failures, or unresolved risks. Each request must name a concrete decision, risk, or approach to review. Pass only highest-priority cited file ranges through evidence so Advisor can inspect primary source. Advisor critiques evidence, reasoning, risks, and proposed direction; Scout gathers evidence, main model owns the final decision. Advisor recommends; verify evidence and perform tools yourself.",
     ],
     parameters: Type.Object(
       {
