@@ -108,6 +108,7 @@ test("Grunt runs synchronously with per-call thinking and derives changed paths"
     assert.equal(result.details.outsideSuggestedPaths, undefined);
     assert.doesNotMatch(result.content[0].text, /Derived changed paths|Worker report/);
     assert.equal(childArgs[childArgs.indexOf("--thinking") + 1], "medium");
+    assert.ok(childArgs.includes("--no-session"));
     assert.ok(childArgs.includes("--no-extensions"));
     assert.ok(childArgs.includes("--system-prompt"));
     assert.ok(!childArgs.includes("--append-system-prompt"));

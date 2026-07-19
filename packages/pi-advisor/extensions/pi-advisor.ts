@@ -300,7 +300,7 @@ export default function advisorExtension(pi: ExtensionAPI, completeAdvisor = com
             timeoutMs: ADVISOR_TIMEOUT_MS,
             maxTokens: advisorMaxTokens(model.contextWindow),
             cacheRetention,
-            sessionId: ctx.sessionManager.getSessionId(),
+            sessionId: `${ctx.sessionManager.getSessionId()}:advisor`,
             ...(thinking
               ? { reasoning: thinking === "off" ? undefined : thinking }
               : process.env.PI_ADVISOR_THINKING

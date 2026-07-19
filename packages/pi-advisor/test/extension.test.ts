@@ -19,6 +19,7 @@ test("parallel Advisor calls serialize and report running duration", async () =>
   const started = new Promise<void>((resolve) => { firstStarted = resolve; });
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const prompts: string[] = [];
+  const sessionIds: string[] = [];
   let runningUpdate: any;
   let reportDuration!: () => void;
   const durationReported = new Promise<void>((resolve) => { reportDuration = resolve; });
@@ -28,11 +29,12 @@ test("parallel Advisor calls serialize and report running duration", async () =>
       reportDuration();
     }
   };
-  const complete = async (_model: any, request: any) => {
+  const complete = async (_model: any, request: any, options: any) => {
     calls++;
     active++;
     maxActive = Math.max(maxActive, active);
     prompts.push(request.messages[0].content[0].text);
+    sessionIds.push(options.sessionId);
     if (calls === 1) {
       firstStarted();
       await firstGate;
@@ -72,6 +74,7 @@ test("parallel Advisor calls serialize and report running duration", async () =>
     assert.ok(runningUpdate.details.durationMs >= 1_000);
     assert.equal(maxActive, 1);
     assert.equal(calls, 2);
+    assert.deepEqual(sessionIds, ["session:advisor", "session:advisor"]);
     assert.equal(results[0].details.callNumber, 1);
     assert.equal(results[1].details.callNumber, 2);
     assert.match(prompts[1], /Prior guidance:\n\nadvice 1/);
