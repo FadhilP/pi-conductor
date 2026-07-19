@@ -39,7 +39,7 @@ test("automatic checkpoints skip read-only turns and unchanged bash", async () =
     appendEntry: (customType: string, data: any) => appended.push({ customType, data }),
     setSessionName() {},
   };
-  extension(pi);
+  extension(pi, undefined, { artifactRoot: join(root, "timeline-artifacts") });
   const ctx: any = {
     cwd: root,
     hasUI: false,
@@ -141,7 +141,7 @@ test("timeline rejects incompatible targets before rollback capture", async () =
       appendEntry: () => { appended++; },
       setSessionName() {},
     };
-    extension(pi);
+    extension(pi, undefined, { artifactRoot: join(root, "timeline-artifacts") });
     const ctx: any = {
       cwd: root,
       hasUI: true,

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { complete, type Message } from "@earendil-works/pi-ai/compat";
 import {
+  getAgentDir,
   SessionManager,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
@@ -22,6 +24,10 @@ import {
   SESSION_TITLE_PROMPT,
 } from "../src/prompts.ts";
 import { git, symbolicHead } from "../src/git.ts";
+import {
+  recordTimelineOwner,
+  startSessionGc,
+} from "../src/session-gc.ts";
 import {
   findRunEntry,
   hasTimeline,
@@ -109,6 +115,7 @@ const compatibilityDetail = (
 export default function timelineExtension(
   pi: ExtensionAPI,
   completeTitle: typeof complete = complete,
+  options: { artifactRoot?: string } = {},
 ) {
   let records = new Map<string, Bound>(),
     paired = false,
@@ -120,7 +127,11 @@ export default function timelineExtension(
     latestVerification: any,
     pendingBash = new Map<string, string | undefined>(),
     automaticMutation = false,
+    releaseSessionLease: ((cleanupIfLast?: boolean) => Promise<void>) | undefined,
+    ephemeralSession = false,
+    currentSessionId = "",
     lastCtx: any;
+  const artifactRoot = options.artifactRoot ?? join(getAgentDir(), "pi-timeline");
   const key = (sessionId: string, entryId: string) => `${sessionId}:${entryId}`;
   const nameSession = async (ctx: any) => {
     if (namingDecided || namingInFlight !== undefined) return;
@@ -283,19 +294,22 @@ export default function timelineExtension(
           (e: any) => e.type === "message" && e.message.role === "user",
         ) as any;
     if (!user) return;
-    const currentSessionId = ctx.sessionManager.getSessionId();
+    const sessionId = ctx.sessionManager.getSessionId();
     const existing = [...records.values()]
       .reverse()
       .find(
         (bound) =>
-          bound.sessionId === currentSessionId &&
+          bound.sessionId === sessionId &&
           bound.record.promptEntryId === user.id,
       );
     if (paired && existing) return existing.record;
     const continuation = ctx.sessionManager.getLeafId();
+    let snap: Snapshot | undefined;
     try {
-      const snap = await capture(ctx.cwd, ctx.sessionManager.getSessionId()),
-        identity = await worktreeId(ctx.cwd),
+      const checkpointRoot = await git(ctx.cwd, ["rev-parse", "--show-toplevel"]);
+      await recordTimelineOwner(artifactRoot, sessionId, checkpointRoot);
+      snap = await capture(ctx.cwd, sessionId);
+      const identity = await worktreeId(ctx.cwd),
         verification = latestVerification?.worktreeId === identity && latestVerification.state === "passed"
           ? {
               runId: latestVerification.runId,
@@ -309,7 +323,7 @@ export default function timelineExtension(
           version: 3,
           kind: "pi-prompt-checkpoint",
           promptEntryId: user.id,
-          ownerSessionId: ctx.sessionManager.getSessionId(),
+          ownerSessionId: sessionId,
           continuationEntryId: continuation,
           ...snap,
           createdAt: new Date().toISOString(),
@@ -317,17 +331,18 @@ export default function timelineExtension(
         };
       pi.appendEntry("pi-prompt-checkpoint", record);
       const checkpointEntryId = ctx.sessionManager.getLeafId()!;
-      records.set(key(currentSessionId, checkpointEntryId), {
+      records.set(key(sessionId, checkpointEntryId), {
         record,
         checkpointEntryId,
         preview: promptText(user.message),
-        sessionId: currentSessionId,
+        sessionId,
         sessionPath: ctx.sessionManager.getSessionFile(),
       });
       paired = true;
       refresh(ctx);
       return record;
     } catch (e: any) {
+      if (snap) await deleteRefs(snap).catch(() => {});
       if (ctx.hasUI)
         ctx.ui.notify(`Timeline checkpoint skipped: ${e.message}`, "warning");
     }
@@ -344,6 +359,14 @@ export default function timelineExtension(
     latestVerification = undefined;
     pendingBash.clear();
     automaticMutation = false;
+    const nextSessionId = ctx.sessionManager.getSessionId();
+    const reuseSessionLease = !!releaseSessionLease && currentSessionId === nextSessionId;
+    if (releaseSessionLease && !reuseSessionLease)
+      await releaseSessionLease(ephemeralSession);
+    currentSessionId = nextSessionId;
+    if (!reuseSessionLease)
+      releaseSessionLease = await startSessionGc(artifactRoot, currentSessionId);
+    ephemeralSession = !ctx.sessionManager.getSessionFile?.();
     await load(ctx);
     paired = false;
     namingGeneration++;
@@ -353,11 +376,14 @@ export default function timelineExtension(
       .some((entry: any) => entry.type === "session_info");
     refresh(ctx);
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
     namingGeneration++;
     namingInFlight = undefined;
     disposeVerify();
     disposeCheckpoint();
+    await releaseSessionLease?.(ephemeralSession);
+    releaseSessionLease = undefined;
+    currentSessionId = "";
   });
   pi.on("session_info_changed", () => {
     namingDecided = true;

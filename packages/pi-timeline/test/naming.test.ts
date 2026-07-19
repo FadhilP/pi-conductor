@@ -1,4 +1,6 @@
 import test from "node:test";
+import { randomUUID } from "node:crypto";
+import { readdir, rm } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +16,8 @@ function namingHarness(entries: any[], completeTitle: any = async () => ({
     registerCommand() {},
     setSessionName: (name: string) => names.push(name),
   };
-  extension(pi, completeTitle);
+  const artifactRoot = join(tmpdir(), `pi-timeline-naming-${randomUUID()}`);
+  extension(pi, completeTitle, { artifactRoot });
   const ctx: any = {
     cwd: join(tmpdir(), "pi-timeline-naming-test"),
     hasUI: false,
@@ -30,8 +33,21 @@ function namingHarness(entries: any[], completeTitle: any = async () => ({
       getSessionId: () => "naming-test",
     },
   };
-  return { handlers, names, ctx };
+  return { handlers, names, ctx, artifactRoot };
 }
+
+test("same-session start keeps one continuous artifact lease", async () => {
+  const { handlers, ctx, artifactRoot } = namingHarness([]);
+  try {
+    await handlers.get("session_start")![0]({ reason: "startup" }, ctx);
+    const initial = await readdir(join(artifactRoot, "session-artifacts"));
+    await handlers.get("session_start")![0]({ reason: "reload" }, ctx);
+    assert.deepEqual(await readdir(join(artifactRoot, "session-artifacts")), initial);
+    await handlers.get("session_shutdown")![0]({}, ctx);
+  } finally {
+    await rm(artifactRoot, { recursive: true, force: true });
+  }
+});
 
 test("settled unnamed session gets a dedicated semantic title", async () => {
   const calls: any[] = [], entries = [

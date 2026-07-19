@@ -1,13 +1,21 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import extension from "../extensions/pi-continuity.ts";
 
 const exec = promisify(execFile);
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const isolatedAgentDir = await mkdtemp(join(tmpdir(), "continuity-extension-agent-"));
+process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
+after(async () => {
+  if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+  await rm(isolatedAgentDir, { recursive: true, force: true });
+});
 
 async function waitFor(predicate: () => boolean) {
   for (let attempt = 0; attempt < 100 && !predicate(); attempt++)
@@ -975,6 +983,9 @@ test("child reload preserves progress instead of replaying the handoff snapshot"
     const sessionStart = app.handlers.get("session_start")![0];
     await sessionStart({ reason: "startup" }, ctx);
     assert.equal(app.modelSelections(), 1);
+    const leaseDirectory = join(root, "agent", "pi-continuity", "session-artifacts");
+    const initialLeases = await readdir(leaseDirectory);
+    assert.equal(initialLeases.length, 1);
 
     await app.tools.get("continuity_update").execute(
       "done",
@@ -985,6 +996,7 @@ test("child reload preserves progress instead of replaying the handoff snapshot"
     );
     await sessionStart({ reason: "reload" }, ctx);
 
+    assert.deepEqual(await readdir(leaseDirectory), initialLeases, "reload keeps the same lease continuously");
     assert.equal(app.modelSelections(), 1);
     const context = await app.handlers.get("context")![0]({ messages: [] }, ctx);
     assert.match(context.messages.at(-1).content, /Done: 1/);

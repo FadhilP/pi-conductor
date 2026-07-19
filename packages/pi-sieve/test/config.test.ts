@@ -29,7 +29,7 @@ test("sieve config persists active pruning and threshold atomically", async () =
 });
 
 test("sieve config defaults safely and quarantines invalid settings", async () => {
-  assert.equal(configuredActivePruning({ version: 1 }), false);
+  assert.equal(configuredActivePruning({ version: 1 }), true);
   assert.equal(configuredThreshold({ version: 1 }), SIEVE_THRESHOLD);
 
   for (const value of [

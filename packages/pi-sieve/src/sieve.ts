@@ -3,7 +3,7 @@ export const ELIGIBLE_TOOL_NAMES = ["bash", "grep", "find", "ls", "rg", "fd"] as
 export const READ_TOOL_NAME = "read";
 export const RECALL_TOOL_NAME = "sieve_recall";
 export const RECENT_WINDOW_POLICY =
-  "Age 0 is preserved unless opt-in active pruning is enabled; successful eligible age-1 output is capped at three times the threshold.";
+  "Age 0 is preserved unless opt-in active pruning is enabled; successful eligible age-1 output is capped at the threshold with active pruning, or three times the threshold without it.";
 export const GIANT_ERROR_TAIL_CHARS = 2_048;
 
 export type SieveOptions = {
@@ -118,8 +118,17 @@ export function recalledGiantErrorMarker(toolName: string, sourceChars: number) 
   return `[pi-sieve: recalled ${toolName} error ${sourceChars} chars truncated]\n`;
 }
 
-export function activeOmissionMarker(toolName: string, toolCallId: string, sourceChars: number) {
-  return `[pi-sieve: ${toolName} active result ${sourceChars} chars omitted; use sieve_recall with toolCallId ${JSON.stringify(toolCallId)}]`;
+export function partialOmissionMarker(toolName: string, sourceChars: number, omittedChars: number, recalled = false) {
+  return `[pi-sieve: ${recalled ? "recalled " : ""}${toolName} ${sourceChars} chars; ${omittedChars} chars omitted]`;
+}
+
+export function activeOmissionMarker(
+  toolName: string,
+  toolCallId: string,
+  sourceChars: number,
+  omittedChars: number,
+) {
+  return `[pi-sieve: ${toolName} active result ${sourceChars} chars; ${omittedChars} chars omitted; use sieve_recall with toolCallId ${JSON.stringify(toolCallId)}]`;
 }
 
 function textOnlyBlocks(content: unknown): TextBlock[] | undefined {
@@ -180,6 +189,74 @@ function sieveSource(message: ContextMessage, allowRecall: boolean): SieveSource
 
 function replaceWithMarker<T extends ContextMessage>(message: T, marker: string): T {
   return { ...message, content: [{ type: "text", text: marker }] } as T;
+}
+
+type ActiveSlice = { outboundText: string; omittedText: string };
+type OldSuccessSlice = ActiveSlice & { retainedChars: number };
+
+function sliceOldSuccess(
+  blocks: TextBlock[],
+  source: SieveSource,
+  maxOutboundChars: number,
+  maxRetainedChars: number,
+): OldSuccessSlice | undefined {
+  if (maxRetainedChars <= 0) return undefined;
+  const text = blocks.map((block) => block.text).join("");
+  let omittedChars = text.length;
+
+  // Only omittedChars' decimal width affects the next value, so this reaches a fixed point.
+  for (;;) {
+    const marker = partialOmissionMarker(source.toolName, text.length, omittedChars, source.recalled);
+    const retainedChars = Math.min(maxRetainedChars, maxOutboundChars - marker.length - 2);
+    if (retainedChars <= 0) return undefined;
+    const nextOmittedChars = text.length - retainedChars;
+    if (nextOmittedChars !== omittedChars) {
+      omittedChars = nextOmittedChars;
+      continue;
+    }
+    const headChars = Math.floor(retainedChars / 2);
+    const tailChars = retainedChars - headChars;
+    return {
+      outboundText: text.slice(0, headChars) + "\n" + marker + "\n" + text.slice(-tailChars),
+      omittedText: text.slice(headChars, text.length - tailChars),
+      retainedChars,
+    };
+  }
+}
+
+function sliceActiveResult(
+  blocks: TextBlock[],
+  source: SieveSource,
+  toolCallId: string,
+  threshold: number,
+): ActiveSlice | undefined {
+  const text = blocks.map((block) => block.text).join("");
+  const separators = source.isError ? 1 : 2;
+  let omittedChars = text.length;
+
+  // Only omittedChars' decimal width affects the next value, so this reaches a fixed point.
+  for (;;) {
+    const marker = activeOmissionMarker(source.toolName, toolCallId, text.length, omittedChars);
+    const retainedChars = threshold - marker.length - separators;
+    if (retainedChars <= 0) return undefined;
+    const nextOmittedChars = text.length - retainedChars;
+    if (nextOmittedChars !== omittedChars) {
+      omittedChars = nextOmittedChars;
+      continue;
+    }
+    if (source.isError) {
+      return {
+        outboundText: marker + "\n" + text.slice(-retainedChars),
+        omittedText: text.slice(0, -retainedChars),
+      };
+    }
+    const headChars = Math.floor(retainedChars / 2);
+    const tailChars = retainedChars - headChars;
+    return {
+      outboundText: text.slice(0, headChars) + "\n" + marker + "\n" + text.slice(-tailChars),
+      omittedText: text.slice(headChars, text.length - tailChars),
+    };
+  }
 }
 
 /**
@@ -254,22 +331,22 @@ export function sieveMessages<T extends ContextMessage>(
         stats.skipped.recoveryUnavailable++;
         continue;
       }
-      const marker = activeOmissionMarker(source.toolName, toolCallId, sourceLength);
-      if (marker.length >= sourceLength) {
+      const sliced = sliceActiveResult(blocks, source, toolCallId, threshold);
+      if (!sliced) {
         stats.skipped.recoveryUnavailable++;
         continue;
       }
-      replacements.set(index, replaceWithMarker(message, marker));
+      replacements.set(index, replaceWithMarker(message, sliced.outboundText));
       recoverableActiveResults.push({
         toolCallId,
         toolName: source.toolName,
-        content: blocks.map((block) => ({ ...block })),
-        isError: (message as { isError?: unknown }).isError === true,
+        content: [{ type: "text", text: sliced.omittedText }],
+        isError: source.isError,
       });
       stats.transformed++;
       stats.transformedBy.activeThreshold++;
-      stats.omittedChars += sourceLength;
-      stats.netCharsSaved += Math.max(0, sourceLength - marker.length);
+      stats.omittedChars += sliced.omittedText.length;
+      stats.netCharsSaved += Math.max(0, sourceLength - sliced.outboundText.length);
       continue;
     }
     if (cutoff === undefined) {
@@ -308,38 +385,46 @@ export function sieveMessages<T extends ContextMessage>(
       continue;
     }
 
-    const effectiveThreshold = age === 1 ? 3 * threshold : effectiveThresholdForAge(age, threshold);
-    if (sourceLength > effectiveThreshold) {
-      const marker = source.recalled
-        ? recalledOmissionMarker(source.toolName, sourceLength)
-        : omissionMarker(source.toolName, sourceLength);
-      replacements.set(index, replaceWithMarker(message, marker));
-      stats.transformed++;
-      stats.transformedBy.ageThreshold++;
-      stats.omittedChars += sourceLength;
-      stats.netCharsSaved += Math.max(0, sourceLength - marker.length);
-      continue;
-    }
-
-    if (age === 1) {
+    const effectiveThreshold = age === 1
+      ? (options.pruneActive ? threshold : 3 * threshold)
+      : effectiveThresholdForAge(age, threshold);
+    if (age === 1 && sourceLength <= effectiveThreshold) {
       stats.skipped.atOrBelowThreshold++;
       continue;
     }
 
-    if (retainedChars + sourceLength > retainedBudget) {
-      const marker = source.recalled
-        ? recalledOmissionMarker(source.toolName, sourceLength)
-        : omissionMarker(source.toolName, sourceLength);
-      replacements.set(index, replaceWithMarker(message, marker));
-      stats.transformed++;
-      stats.transformedBy.budget++;
-      stats.omittedChars += sourceLength;
-      stats.netCharsSaved += Math.max(0, sourceLength - marker.length);
+    const remainingBudget = age === 1 ? sourceLength : retainedBudget - retainedChars;
+    if (age > 1 && sourceLength <= effectiveThreshold && sourceLength <= remainingBudget) {
+      retainedChars += sourceLength;
+      stats.skipped.atOrBelowThreshold++;
       continue;
     }
 
-    retainedChars += sourceLength;
-    stats.skipped.atOrBelowThreshold++;
+    const byAgeThreshold = sourceLength > effectiveThreshold;
+    const maxOutboundChars = byAgeThreshold ? effectiveThreshold : Math.max(0, sourceLength - 1);
+    const blocks = textOnlyBlocks((message as Record<string, unknown>).content)!;
+    const sliced = sliceOldSuccess(blocks, source, maxOutboundChars, remainingBudget);
+    if (sliced) {
+      replacements.set(index, replaceWithMarker(message, sliced.outboundText));
+      if (age > 1) retainedChars += sliced.retainedChars;
+      stats.omittedChars += sliced.omittedText.length;
+      stats.netCharsSaved += Math.max(0, sourceLength - sliced.outboundText.length);
+    } else {
+      const marker = source.recalled
+        ? recalledOmissionMarker(source.toolName, sourceLength)
+        : omissionMarker(source.toolName, sourceLength);
+      if (marker.length >= sourceLength) {
+        if (age > 1) retainedChars += sourceLength;
+        stats.skipped.atOrBelowThreshold++;
+        continue;
+      }
+      replacements.set(index, replaceWithMarker(message, marker));
+      stats.omittedChars += sourceLength;
+      stats.netCharsSaved += sourceLength - marker.length;
+    }
+    stats.transformed++;
+    if (byAgeThreshold) stats.transformedBy.ageThreshold++;
+    else stats.transformedBy.budget++;
   }
 
   return {

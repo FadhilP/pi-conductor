@@ -27,6 +27,7 @@ import {
   defaultRoot,
 } from "../src/storage.ts";
 import { registerWorkspace, type Workspace } from "../src/workspace.ts";
+import { pruneOrphanWorkFiles, startSessionGc } from "../src/session-gc.ts";
 import {
   candidate,
   compact,
@@ -133,6 +134,9 @@ export default function continuityExtension(pi: ExtensionAPI) {
     approvalContext: any,
     approvalSelectionOpen = false,
     sessionGeneration = 0,
+    releaseSessionLease: ((cleanupIfLast?: () => Promise<void>) => Promise<void>) | undefined,
+    leasedSessionId = "",
+    ephemeralSession = false,
     schedulePlanApproval = (_ctx: any) => {};
   const modelName = (model: any) => `${model.provider}/${model.id}`;
   const assistantContent = (ctx: any) => {
@@ -431,6 +435,15 @@ export default function continuityExtension(pi: ExtensionAPI) {
   });
   pi.on("session_start", async (_e, ctx) => {
     sessionGeneration++;
+    const sessionId = ctx.sessionManager.getSessionId();
+    const reuseSessionLease = !!releaseSessionLease && leasedSessionId === sessionId;
+    if (releaseSessionLease && !reuseSessionLease) {
+      const previousWorkFile = workFile;
+      await releaseSessionLease(ephemeralSession && previousWorkFile
+        ? () => rm(previousWorkFile, { force: true })
+        : undefined);
+      releaseSessionLease = undefined;
+    }
     currentCwd = ctx.cwd;
     memoryInjectionEnabled = true;
     recentCalls.clear();
@@ -446,8 +459,14 @@ export default function continuityExtension(pi: ExtensionAPI) {
     workFile = join(
       dir,
       "sessions",
-      sessionWorkFile(ctx.sessionManager.getSessionId()),
+      sessionWorkFile(sessionId),
     );
+    if (!reuseSessionLease) {
+      releaseSessionLease = await startSessionGc(root, sessionId, (live) =>
+        pruneOrphanWorkFiles(root, live));
+      leasedSessionId = sessionId;
+    }
+    ephemeralSession = !ctx.sessionManager.getSessionFile?.();
     const p = paths();
     await resetLegacyWorkspaceMemory();
     work = await readJson<Work | undefined>(
@@ -504,7 +523,7 @@ export default function continuityExtension(pi: ExtensionAPI) {
     tasksVisible = true;
     refresh(ctx);
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
     sessionGeneration++;
     pendingApproval = undefined;
     approvalContext = undefined;
@@ -516,6 +535,11 @@ export default function continuityExtension(pi: ExtensionAPI) {
       kind: "unregister",
       owner: "pi-continuity",
     });
+    await releaseSessionLease?.(ephemeralSession && workFile
+      ? () => rm(workFile, { force: true })
+      : undefined);
+    releaseSessionLease = undefined;
+    leasedSessionId = "";
   });
   pi.on("agent_start", (_e, ctx) => {
     awaitingClarificationProse = false;

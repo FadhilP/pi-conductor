@@ -17,7 +17,7 @@ export const defaultConfig = (): SieveConfig => ({ version: 1 });
 export const configPath = (agentDir = getAgentDir()) => join(agentDir, "pi-sieve", "config.json");
 
 export function configuredActivePruning(config: SieveConfig): boolean {
-  return config.activePruning ?? false;
+  return config.activePruning ?? true;
 }
 
 export function configuredThreshold(config: SieveConfig): number {

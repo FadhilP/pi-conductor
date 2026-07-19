@@ -64,7 +64,7 @@ function statusText(
     `Retained successful-output budget: ${3 * threshold} characters, newest-to-oldest`,
     `Eligible tools: ${ELIGIBLE_TOOL_NAMES.join(", ")}`,
     `Read exclusion: ${READ_TOOL_NAME} is never transformed`,
-    `Active-result pruning: ${activePruning ? "enabled" : "disabled (opt in with /sieve active enable)"}`,
+    `Active-result pruning: ${activePruning ? "enabled" : "disabled"}`,
     `Active recalls: ${activeRecalls}; restored ~${estimatedTokens(activeRecalledChars)} tokens`,
     `Recent-window policy: ${RECENT_WINDOW_POLICY}`,
     `Latest call (${latestMode === "observe" ? "observe projections" : "enabled actual"}): ${statsText(latestStats, latestLabel)}`,
@@ -80,7 +80,7 @@ export default function sieveExtension(pi: ExtensionAPI, options: { configPath?:
   let latestStats = emptyTransformStats();
   let cumulativeActual = emptyTransformStats();
   let cumulativeProjected = emptyTransformStats();
-  let activePruning = false;
+  let activePruning = true;
   let activeRecalls = 0;
   let activeRecalledChars = 0;
   let recoverableActiveResults = new Map<string, RecoverableActiveResult>();

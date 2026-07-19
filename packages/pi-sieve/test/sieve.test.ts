@@ -11,6 +11,7 @@ import {
   activeOmissionMarker,
   giantErrorMarker,
   omissionMarker,
+  partialOmissionMarker,
   recalledGiantErrorMarker,
   recalledOmissionMarker,
   sieveMessages,
@@ -42,25 +43,37 @@ function oldResultAtAge(age: number, text: string, extra: Record<string, unknown
   return sieveMessages([user("before"), textResult("bash", text, extra), ...Array.from({ length: age }, (_, index) => user(`after-${index}`))], 4_000);
 }
 
-test("uses a compact normal marker and keeps all text blocks as one source", () => {
-  const sourceLength = SIEVE_THRESHOLD + 1;
-  const content = [{ type: "text", text: "x".repeat(4_000) }, { type: "text", text: "y".repeat(sourceLength - 4_000) }];
+function assertPartialOutput(output: string, source: string, toolName: string, recalled = false) {
+  const match = output.match(/; (\d+) chars omitted\]/);
+  assert.ok(match);
+  const omittedChars = Number(match[1]);
+  const marker = partialOmissionMarker(toolName, source.length, omittedChars, recalled);
+  const [head, tail] = output.split(`\n${marker}\n`);
+  assert.equal(head.length + omittedChars + tail.length, source.length);
+  assert.equal(head, source.slice(0, head.length));
+  assert.equal(tail, source.slice(-tail.length));
+  return omittedChars;
+}
+
+test("partially retains old output and treats all text blocks as one source", () => {
+  const source = "x".repeat(4_000) + "y".repeat(SIEVE_THRESHOLD + 1 - 4_000);
+  const content = [{ type: "text", text: source.slice(0, 4_000) }, { type: "text", text: source.slice(4_000) }];
   const result = sieveMessages([
     user("first"),
     { ...textResult("bash", "unused"), content },
     user("second"),
     user("third"),
   ]);
-  const marker = omissionMarker("bash", SIEVE_THRESHOLD + 1);
+  const output = (result.messages[1].content as any)[0].text as string;
+  const omittedChars = assertPartialOutput(output, source, "bash");
 
-  assert.equal(marker, `[pi-sieve: bash ${sourceLength} chars omitted]`);
-  assert.equal((result.messages[1].content as any)[0].text, marker);
+  assert.equal(output.length, SIEVE_THRESHOLD);
   assert.deepEqual(result.stats, {
     scanned: 1,
     transformed: 1,
     transformedBy: { ageThreshold: 1, budget: 0, giantError: 0, activeThreshold: 0 },
-    omittedChars: sourceLength,
-    netCharsSaved: sourceLength - marker.length,
+    omittedChars,
+    netCharsSaved: source.length - output.length,
     skipped: noSkips,
   });
 });
@@ -89,6 +102,19 @@ test("preserves age 0 and caps only eligible successful age-1 output", () => {
   assert.equal(equal.stats.transformed, 0);
   assert.equal(over.stats.transformedBy.ageThreshold, 1);
 
+  const activeEqual = sieveMessages([
+    user("before"),
+    textResult("fd", "x".repeat(4_000)),
+    user("after"),
+  ], 4_000, { pruneActive: true });
+  const activeOver = sieveMessages([
+    user("before"),
+    textResult("fd", "x".repeat(4_001)),
+    user("after"),
+  ], 4_000, { pruneActive: true });
+  assert.equal(activeEqual.stats.transformed, 0, "active age-1 equality is retained");
+  assert.equal(activeOver.stats.transformedBy.ageThreshold, 1, "active age-1 output cannot re-expand");
+
   const combined = sieveMessages([
     user("before"),
     textResult("fd", "x".repeat(12_000)),
@@ -115,14 +141,21 @@ test("enforces the retained successful-output budget at equality, overflow, and 
 
   const overflow = sieveMessages(budgetContext([1_000, 1_000, 1_000, 1]), 1_000);
   assert.equal(overflow.stats.transformedBy.budget, 1);
-  assert.equal((overflow.messages[1].content as any)[0].text, omissionMarker("bash", 1_000));
+  const overflowOutput = (overflow.messages[1].content as any)[0].text as string;
+  assertPartialOutput(overflowOutput, "0".repeat(1_000), "bash");
+  assert.ok(overflowOutput.length < 1_000);
   assert.equal((overflow.messages[4].content as any)[0].text.length, 1);
 
   const continueAfterOverflow = sieveMessages(budgetContext([800, 800, 800, 800, 800]), 1_000);
   assert.equal(continueAfterOverflow.stats.transformedBy.budget, 2);
   assert.equal((continueAfterOverflow.messages[1].content as any)[0].text, omissionMarker("bash", 800));
-  assert.equal((continueAfterOverflow.messages[2].content as any)[0].text, omissionMarker("bash", 800));
+  assertPartialOutput((continueAfterOverflow.messages[2].content as any)[0].text, "1".repeat(800), "bash");
   assert.equal((continueAfterOverflow.messages[3].content as any)[0].text.length, 800);
+
+  const tiny = textResult("bash", "x".repeat(11));
+  const noExpansion = sieveMessages([user("before"), tiny, user("second"), user("third")], 10);
+  assert.equal(noExpansion.messages[1], tiny, "marker larger than source fails open");
+  assert.equal(noExpansion.stats.transformed, 0);
 });
 
 test("truncates only giant eligible text errors and preserves their concatenated source tail", () => {
@@ -242,9 +275,12 @@ test("keeps recalls visible at age 0 then prunes eligible recalled output with a
   assert.equal(current.messages[1], activeRecall);
   assert.equal(current.stats.transformed, 0);
 
-  const agedRecall = recalledResult("rg", "x".repeat(12_001));
+  const agedRecallText = "x".repeat(12_001);
+  const agedRecall = recalledResult("rg", agedRecallText);
   const aged = sieveMessages([user("before"), agedRecall, user("after")], 4_000, { pruneActive: true });
-  assert.equal((aged.messages[1].content as any)[0].text, recalledOmissionMarker("rg", 12_001));
+  const agedOutput = (aged.messages[1].content as any)[0].text as string;
+  assert.equal(agedOutput.length, 4_000);
+  assertPartialOutput(agedOutput, agedRecallText, "rg", true);
   assert.equal(aged.stats.transformedBy.ageThreshold, 1);
   assert.equal(aged.stats.transformedBy.activeThreshold, 0);
 
@@ -291,23 +327,38 @@ test("keeps recalls visible at age 0 then prunes eligible recalled output with a
   }
 });
 
-test("optionally prunes recoverable active results on the first turn", () => {
-  const success = textResult("bash", "s".repeat(4_001), { toolCallId: "active-success" });
-  const error = textResult("rg", "e".repeat(4_001), { toolCallId: "active-error", isError: true });
+test("partially prunes recoverable active results and stores only omitted text", () => {
+  const successText = "h".repeat(2_001) + "t".repeat(2_000);
+  const success = {
+    ...textResult("bash", "unused", { toolCallId: "active-success" }),
+    content: [{ type: "text", text: successText.slice(0, 2_001) }, { type: "text", text: successText.slice(2_001) }],
+  };
+  const errorText = "e".repeat(4_001);
+  const error = textResult("rg", errorText, { toolCallId: "active-error", isError: true });
   const read = textResult("read", "r".repeat(10_000), { toolCallId: "active-read" });
   const result = sieveMessages([user("first"), success, error, read], 4_000, { pruneActive: true });
 
-  assert.equal(
-    (result.messages[1].content as any)[0].text,
-    activeOmissionMarker("bash", "active-success", 4_001),
-  );
-  assert.equal(
-    (result.messages[2].content as any)[0].text,
-    activeOmissionMarker("rg", "active-error", 4_001),
-  );
+  const successRecovery = result.recoverableActiveResults.find(({ toolCallId }) => toolCallId === "active-success")!;
+  const successOmitted = successRecovery.content[0].text;
+  const successMarker = activeOmissionMarker("bash", "active-success", successText.length, successOmitted.length);
+  const successOutbound = (result.messages[1].content as any)[0].text as string;
+  const [successHead, successTail] = successOutbound.split(`\n${successMarker}\n`);
+  assert.equal(successOutbound.length, 4_000);
+  assert.equal(successHead + successOmitted + successTail, successText);
+
+  const errorRecovery = result.recoverableActiveResults.find(({ toolCallId }) => toolCallId === "active-error")!;
+  const errorOmitted = errorRecovery.content[0].text;
+  const errorMarker = activeOmissionMarker("rg", "active-error", errorText.length, errorOmitted.length);
+  const errorOutbound = (result.messages[2].content as any)[0].text as string;
+  assert.equal(errorOutbound.length, 4_000);
+  assert.equal(errorOutbound, errorMarker + "\n" + errorText.slice(errorOmitted.length));
+  assert.equal(errorOmitted + errorText.slice(errorOmitted.length), errorText);
+
   assert.equal(result.messages[3], read);
-  assert.equal((success.content as any)[0].text.length, 4_001);
+  assert.equal((success.content as any)[0].text + (success.content as any)[1].text, successText);
   assert.equal(result.stats.transformedBy.activeThreshold, 2);
+  assert.equal(result.stats.omittedChars, successOmitted.length + errorOmitted.length);
+  assert.equal(result.stats.netCharsSaved, successText.length + errorText.length - successOutbound.length - errorOutbound.length);
   assert.deepEqual(
     new Set(result.recoverableActiveResults.map(({ toolCallId }) => toolCallId)),
     new Set(["active-success", "active-error"]),
@@ -331,6 +382,29 @@ test("optionally prunes recoverable active results on the first turn", () => {
   ], 100, { pruneActive: true });
   assert.equal(oversizedMarker.stats.transformed, 0);
   assert.equal(oversizedMarker.stats.skipped.recoveryUnavailable, 1);
+});
+
+test("active slicing converges across tiny, odd, and omitted-count boundary payloads", () => {
+  const source = Array.from({ length: 1_100 }, (_, index) => String(index % 10)).join("");
+  for (const [candidateRetainedChars, expectedRetainedChars] of [[1, 1], [3, 3], [101, 100]]) {
+    const candidateOmittedChars = source.length - candidateRetainedChars;
+    const candidateMarker = activeOmissionMarker("bash", "boundary", source.length, candidateOmittedChars);
+    const threshold = candidateMarker.length + 2 + candidateRetainedChars;
+    const result = sieveMessages([
+      user("first"),
+      textResult("bash", source, { toolCallId: "boundary" }),
+    ], threshold, { pruneActive: true });
+    const outbound = (result.messages[1].content as any)[0].text as string;
+    const omitted = result.recoverableActiveResults[0].content[0].text;
+    const marker = activeOmissionMarker("bash", "boundary", source.length, omitted.length);
+    const [head, tail] = outbound.split(`\n${marker}\n`);
+
+    assert.equal(outbound.length, threshold);
+    assert.equal(source.length - omitted.length, expectedRetainedChars);
+    assert.equal(head.length, Math.floor(expectedRetainedChars / 2));
+    assert.equal(tail.length, expectedRetainedChars - head.length);
+    assert.equal(head + omitted + tail, source);
+  }
 });
 
 test("runtime modes, persisted settings, active recall, thresholds, and telemetry", async () => {
@@ -370,11 +444,14 @@ test("runtime modes, persisted settings, active recall, thresholds, and telemetr
   assert.equal(activeTools.includes("sieve_recall"), true);
   runtimeInitialized = true;
   for (const handler of handlers.get("session_start") ?? []) await handler({}, {});
-  assert.equal(activeTools.includes("sieve_recall"), false);
+  assert.equal(activeTools.includes("sieve_recall"), true);
   const hook = handlers.get("context")![0];
   const command = commands.get("sieve");
   const oversizedLength = SIEVE_THRESHOLD + 1;
   const context = { messages: [user("first"), textResult("ls", "x".repeat(oversizedLength)), user("second"), user("third")] };
+  const expectedOldStats = sieveMessages(context.messages).stats;
+  const expectedGrossTokens = Math.ceil(expectedOldStats.omittedChars / 4);
+  const expectedNetTokens = Math.ceil(expectedOldStats.netCharsSaved / 4);
   let notification = "";
   const ctx: any = { ui: { notify: (text: string) => { notification = text; } } };
 
@@ -395,17 +472,15 @@ test("runtime modes, persisted settings, active recall, thresholds, and telemetr
   assert.equal((context.messages[1].content[0] as { text: string }).text.length, oversizedLength);
   await command.handler("status", ctx);
   assert.match(notification, /pi-sieve: observe/);
-  assert.match(notification, new RegExp(`Latest call \\(observe projections\\): scanned 1; projected transformations 1; transform types: age-threshold 1, budget 0, giant-error 0, active-threshold 0; projected gross omitted ~${Math.ceil(oversizedLength / 4)} tokens`));
+  assert.match(notification, new RegExp(`Latest call \\(observe projections\\): scanned 1; projected transformations 1; transform types: age-threshold 1, budget 0, giant-error 0, active-threshold 0; projected gross omitted ~${expectedGrossTokens} tokens`));
   assert.match(notification, /actual transformations 0.*projected observe transformations 1/);
 
   await command.handler("enable", ctx);
   const outbound = hook(context);
   assert.notEqual(outbound.messages[1], context.messages[1]);
   await command.handler("status", ctx);
-  const net = oversizedLength - omissionMarker("ls", oversizedLength).length;
-  const estimatedNetTokens = Math.ceil(net / 4);
   assert.match(notification, /actual transformations 1.*projected observe transformations 1/);
-  assert.match(notification, new RegExp(`actual net saved ~${estimatedNetTokens} tokens; projected observe transformations 1; projected observe gross omitted ~${Math.ceil(oversizedLength / 4)} tokens; projected observe net saved ~${estimatedNetTokens} tokens`));
+  assert.match(notification, new RegExp(`actual net saved ~${expectedNetTokens} tokens; projected observe transformations 1; projected observe gross omitted ~${expectedGrossTokens} tokens; projected observe net saved ~${expectedNetTokens} tokens`));
 
   await command.handler("threshold 1000", ctx);
   await command.handler("status", ctx);
@@ -435,21 +510,21 @@ test("runtime modes, persisted settings, active recall, thresholds, and telemetr
   assert.equal(activeTools.includes("sieve_recall"), true);
   const activeSource = textResult("bash", "z".repeat(oversizedLength), { toolCallId: "active-runtime" });
   const activeOutbound = hook({ messages: [user("first"), activeSource] });
-  assert.equal(
-    activeOutbound.messages[1].content[0].text,
-    activeOmissionMarker("bash", "active-runtime", oversizedLength),
-  );
+  const activeOutboundText = activeOutbound.messages[1].content[0].text;
+  assert.equal(activeOutboundText.length, SIEVE_THRESHOLD);
   hook({ messages: [user("partial same turn")] });
   const recallTool = tools.get("sieve_recall");
   const recalled = await recallTool.execute("recall-call", { toolCallId: "active-runtime" });
-  assert.equal(recalled.content[0].text.length, oversizedLength);
+  const omittedLength = recalled.content[0].text.length;
+  assert.ok(omittedLength > 0 && omittedLength < oversizedLength);
+  assert.ok(activeOutboundText.includes(activeOmissionMarker("bash", "active-runtime", oversizedLength, omittedLength)));
   assert.equal(recalled.details.sourceToolName, "bash");
   recalled.content[0].text = "mutated response";
   const recalledAgain = await recallTool.execute("recall-call-2", { toolCallId: "active-runtime" });
-  assert.equal(recalledAgain.content[0].text.length, oversizedLength);
+  assert.equal(recalledAgain.content[0].text.length, omittedLength);
   await command.handler("status", ctx);
   assert.match(notification, /Active-result pruning: enabled/);
-  assert.match(notification, new RegExp(`Active recalls: 2; restored ~${Math.ceil(2 * oversizedLength / 4)} tokens`));
+  assert.match(notification, new RegExp(`Active recalls: 2; restored ~${Math.ceil(2 * omittedLength / 4)} tokens`));
   for (const handler of handlers.get("input") ?? []) await handler({ source: "interactive" }, {});
   const missed = await recallTool.execute("recall-call-3", { toolCallId: "active-runtime" });
   assert.equal(missed.details.found, false);
