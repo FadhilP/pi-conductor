@@ -8,6 +8,44 @@ function trimToBytes(text: string, maxBytes: number): string {
   return output;
 }
 
+function markdownBlocks(text: string): string[] {
+  const blocks: string[] = [];
+  let current: string[] = [];
+  let fence: string | undefined;
+  const flush = () => {
+    const block = current.join("\n").trim();
+    if (block) blocks.push(block);
+    current = [];
+  };
+  for (const line of text.split(/\r?\n/)) {
+    const marker = line.match(/^\s*(```|~~~)/)?.[1];
+    if (marker) fence = fence === marker ? undefined : fence ?? marker;
+    if (!fence && !line.trim()) flush();
+    else current.push(line);
+  }
+  flush();
+  return blocks;
+}
+
+export function capReport(
+  text: string,
+  maxBytes = SCOUT_REPORT_MAX_BYTES,
+): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return { text, truncated: false };
+  const blocks = markdownBlocks(text);
+  const noticeFor = (count: number) => `\n\n[Omitted content: ${count} complete report block${count === 1 ? "" : "s"}. Cap: ${maxBytes} bytes.]`;
+  const kept: string[] = [];
+  let omitted = 0;
+  const reservedNoticeBytes = Buffer.byteLength(noticeFor(blocks.length), "utf8");
+  for (const block of blocks) {
+    const candidate = [...kept, block].join("\n\n");
+    if (Buffer.byteLength(candidate, "utf8") + reservedNoticeBytes <= maxBytes) kept.push(block);
+    else omitted++;
+  }
+  const notice = noticeFor(omitted);
+  return { text: [kept.join("\n\n"), notice.trim()].filter(Boolean).join("\n\n"), truncated: true };
+}
+
 export function capText(
   text: string,
   maxBytes = MAX_BYTES,

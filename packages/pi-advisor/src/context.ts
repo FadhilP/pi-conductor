@@ -1,17 +1,9 @@
 import { ADVISOR_MAX_OUTPUT_TOKENS } from "./advisor.ts";
 import { redact } from "./redact.ts";
 
-export type Snapshot = { text: string; estimatedTokens: number; redactionCount: number; truncated: boolean };
+export type Snapshot = { text: string; estimatedTokens: number; redactionCount: number; truncated: boolean; requiredContextOmitted: boolean };
 const CHARS_PER_TOKEN = 4;
 const MAX_INPUT_TOKENS = 32_768;
-const REQUEST_TOKENS = 2_048;
-const USER_TOKENS = 4_096;
-const EVIDENCE_TOKENS = 8_192;
-const CONTINUITY_TOKENS = 4_096;
-const VERIFICATION_TOKENS = 1_024;
-const SUMMARY_TOKENS = 8_192;
-const ASSISTANT_TOKENS = 4_096;
-const SYSTEM_TOKENS = 4_096;
 
 function contentText(content: any): string {
   if (typeof content === "string") return content;
@@ -43,64 +35,68 @@ export function advisorMaxTokens(contextWindow: number): number {
   return Math.max(128, Math.min(ADVISOR_MAX_OUTPUT_TOKENS, Math.floor(window * 0.25)));
 }
 
-function headTail(text: string, maxChars: number, label: string): string {
-  if (text.length <= maxChars) return text;
-  const marker = `\n[${label} truncated: middle omitted]\n`;
-  const available = Math.max(0, maxChars - marker.length);
-  const head = Math.ceil(available / 2);
-  return `${text.slice(0, head)}${marker}${text.slice(text.length - (available - head))}`;
-}
-
 export function buildSnapshot(systemPrompt: string, messages: any[], contextWindow: number, reservedInputTokens = 0): Snapshot {
   const window = Number.isFinite(contextWindow)
       ? Math.max(512, Math.floor(contextWindow))
       : 8_192,
+    reserved = Math.max(0, reservedInputTokens),
     tokenBudget = Math.max(
-      128,
+      0,
       Math.min(
-        Math.max(128, MAX_INPUT_TOKENS - Math.max(0, reservedInputTokens)),
-        Math.floor(window * 0.7),
-        window - advisorMaxTokens(window) - 256,
+        MAX_INPUT_TOKENS - reserved,
+        Math.floor(window * 0.7) - reserved,
+        window - advisorMaxTokens(window) - 256 - reserved,
       ),
     );
   const charBudget = tokenBudget * CHARS_PER_TOKEN;
+  const request = messages.filter(message => message?.role === "custom" && message.customType === "advisor-request").slice(-1).map(serializeMessage);
+  const evidence = messages.filter(message => message?.role === "custom" && message.customType === "advisor-evidence").map(serializeMessage);
+  const continuity = messages.filter(message => message?.role === "custom" && message.customType === "pi-continuity").map(serializeMessage);
+  const verification = messages.filter(message => message?.role === "custom" && message.customType === "pi-verify-result").slice(-1).map(serializeMessage);
+  const summaries = messages.filter(message => message?.role === "compactionSummary" || message?.role === "branchSummary").map(serializeMessage).reverse();
+  const latestUser = [...messages].reverse().find(message => message?.role === "user");
+  const latestAssistant = [...messages].reverse().find(message => message?.role === "assistant" && assistantText(message.content));
+  const system = systemPrompt ? [systemPrompt] : [];
+  const sectionSize = (label: string, records: string[]) => records.length
+    ? `<${label}>\n${records.join("\n\n")}\n</${label}>`.length + 2
+    : 0;
+  const requiredSize = sectionSize("advisor-request", request) + sectionSize("executor-system-prompt", system);
+  if (requiredSize > charBudget) {
+    return { text: "", estimatedTokens: 0, redactionCount: 0, truncated: true, requiredContextOmitted: true };
+  }
+
   const sections: string[] = [];
   let used = 0;
   let truncated = false;
-  const add = (label: string, text: string, tokenCap: number) => {
-    if (!text) return;
-    const header = `<${label}>\n`, footer = `\n</${label}>`;
-    const available = Math.min(tokenCap * CHARS_PER_TOKEN, charBudget - used - header.length - footer.length);
-    if (available <= 0) { truncated = true; return; }
-    const bounded = headTail(text, available, label);
-    if (bounded.length < text.length) truncated = true;
-    const section = `${header}${bounded}${footer}`;
+  const add = (label: string, records: string[], reservedChars = 0) => {
+    if (!records.length) return;
+    const kept: string[] = [];
+    for (const record of records) {
+      const candidate = [...kept, record];
+      if (used + sectionSize(label, candidate) + reservedChars <= charBudget) kept.push(record);
+      else truncated = true;
+    }
+    if (!kept.length) return;
+    const section = `<${label}>\n${kept.join("\n\n")}\n</${label}>`;
     sections.push(section);
     used += section.length + 2;
   };
 
-  const request = messages.filter(message => message?.role === "custom" && message.customType === "advisor-request").slice(-1).map(serializeMessage).join("\n\n");
-  const evidence = messages.filter(message => message?.role === "custom" && message.customType === "advisor-evidence").map(serializeMessage).join("\n\n");
-  const continuity = messages.filter(message => message?.role === "custom" && message.customType === "pi-continuity").map(serializeMessage).join("\n\n");
-  const verification = messages.filter(message => message?.role === "custom" && message.customType === "pi-verify-result").map(serializeMessage).slice(-1).join("\n\n");
-  const summaries = messages.filter(message => message?.role === "compactionSummary" || message?.role === "branchSummary").map(serializeMessage).reverse().join("\n\n");
-  const latestUser = [...messages].reverse().find(message => message?.role === "user");
-  const latestAssistant = [...messages].reverse().find(message => message?.role === "assistant" && assistantText(message.content));
-
-  add("advisor-request", request, REQUEST_TOKENS);
-  add("explicit-evidence", evidence, EVIDENCE_TOKENS);
-  add("continuity-state", continuity, CONTINUITY_TOKENS);
-  add("latest-verification", verification, VERIFICATION_TOKENS);
-  add("session-summaries-newest-first", summaries, SUMMARY_TOKENS);
-  add("latest-user-request", latestUser ? serializeMessage(latestUser) : "", USER_TOKENS);
-  add("latest-assistant-judgment", latestAssistant ? `[ASSISTANT]\n${assistantText(latestAssistant.content)}` : "", ASSISTANT_TOKENS);
-  add("executor-system-prompt", systemPrompt, SYSTEM_TOKENS);
+  const systemSize = sectionSize("executor-system-prompt", system);
+  add("advisor-request", request, systemSize);
+  add("explicit-evidence", evidence, systemSize);
+  add("continuity-state", continuity, systemSize);
+  add("latest-verification", verification, systemSize);
+  add("session-summaries-newest-first", summaries, systemSize);
+  add("latest-user-request", latestUser ? [serializeMessage(latestUser)] : [], systemSize);
+  add("latest-assistant-judgment", latestAssistant ? [`[ASSISTANT]\n${assistantText(latestAssistant.content)}`] : [], systemSize);
+  add("executor-system-prompt", system);
 
   const selected = new Set([latestUser, latestAssistant].filter(Boolean));
   if (messages.some(message => !selected.has(message) && !(message?.role === "custom" && (message.customType === "advisor-request" || message.customType === "advisor-evidence" || message.customType === "pi-continuity" || message.customType === "pi-verify-result")) && message?.role !== "compactionSummary" && message?.role !== "branchSummary")) truncated = true;
-  const marker = truncated ? "\n\n[Non-priority, earlier, or oversized executor context omitted.]" : "";
-  let raw = `${sections.join("\n\n")}${marker}`;
-  if (raw.length > charBudget) { raw = headTail(raw, charBudget, "advisor snapshot"); truncated = true; }
+  const marker = "\n\n[Non-priority, earlier, or oversized executor context omitted.]";
+  let raw = sections.join("\n\n");
+  if (truncated && raw.length + marker.length <= charBudget) raw += marker;
   const clean = redact(raw);
-  return { text: clean.text, estimatedTokens: Math.ceil(clean.text.length / CHARS_PER_TOKEN), redactionCount: clean.count, truncated };
+  return { text: clean.text, estimatedTokens: Math.ceil(clean.text.length / CHARS_PER_TOKEN), redactionCount: clean.count, truncated, requiredContextOmitted: false };
 }

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
-import { capText } from "./result.ts";
+import { capReport, capText } from "./result.ts";
 
 export type ChildUsage = {
   input: number;
@@ -266,7 +266,9 @@ async function runPiUnlocked(args: string[], options: RunPiOptions): Promise<Sco
   }), emptyUsage());
   const final = finalizationMessage ?? messages.at(-1);
   const rawText = final?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n") ?? "";
-  const capped = capText(rawText, options.resultMaxBytes);
+  const capped = options.resultMaxBytes === undefined
+    ? capText(rawText)
+    : capReport(rawText, options.resultMaxBytes);
   const incompleteFinalization = agentSettled && finalizationAttempted && !finalizationSucceeded;
   const budgetFailure = finalizationFailed || incompleteFinalization;
   const error = protocolOverflow

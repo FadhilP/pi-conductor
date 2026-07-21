@@ -10,6 +10,7 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { ADVISOR_MAX_CALLS, capAdvice } from "../src/advisor.ts";
+import { ADVISOR_MAX_COST_USD, advisorBudget } from "../src/budget.ts";
 import { ADVISOR_PROMPT } from "../src/prompts.ts";
 import {
   loadConfig,
@@ -27,7 +28,10 @@ type FailureCode =
   | "timeout"
   | "aborted"
   | "rate_limited"
-  | "invalid_response";
+  | "invalid_response"
+  | "budget_exceeded"
+  | "pricing_unavailable"
+  | "context_overflow";
 type Details = {
   advisorModel?: string;
   durationMs: number;
@@ -247,6 +251,27 @@ export default function advisorExtension(pi: ExtensionAPI, completeAdvisor = com
         model.contextWindow,
         reservedInputTokens,
       );
+      if (snapshot.requiredContextOmitted)
+        return {
+          content: [{ type: "text" as const, text: "Advisor failed nonfatally: required context exceeds the input budget." }],
+          details: { ...base, snapshotEstimatedTokens: 0, truncated: true, failureCode: "context_overflow" as const },
+        };
+      const budget = advisorBudget(
+        model,
+        snapshot.estimatedTokens + reservedInputTokens,
+        advisorMaxTokens(model.contextWindow),
+      );
+      if ("error" in budget) {
+        const reason = budget.error === "pricing_unavailable"
+          ? "selected model pricing is unavailable"
+          : budget.error === "input_cost_exceeds_budget"
+            ? "estimated input cost exceeds the limit"
+            : "estimated output budget is exhausted";
+        return {
+          content: [{ type: "text" as const, text: `Advisor failed nonfatally: ${reason} ($${ADVISOR_MAX_COST_USD.toFixed(2)} limit).` }],
+          details: { ...base, snapshotEstimatedTokens: snapshot.estimatedTokens, redactionCount: snapshot.redactionCount, truncated: snapshot.truncated, failureCode: budget.error === "pricing_unavailable" ? "pricing_unavailable" as const : "budget_exceeded" as const },
+        };
+      }
       if (ctx.hasUI)
         ctx.ui.setStatus(
           "pi-advisor",
@@ -300,7 +325,7 @@ export default function advisorExtension(pi: ExtensionAPI, completeAdvisor = com
             env: auth.env,
             signal: controller.signal,
             timeoutMs: ADVISOR_TIMEOUT_MS,
-            maxTokens: advisorMaxTokens(model.contextWindow),
+            maxTokens: budget.maxTokens,
             cacheRetention,
             sessionId: `${ctx.sessionManager.getSessionId()}:advisor`,
             ...(thinking

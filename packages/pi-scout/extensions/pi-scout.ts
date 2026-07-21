@@ -20,7 +20,7 @@ import {
 import { repoResult } from "../src/checkpoint.ts";
 import { buildParentContext } from "../src/parent-context.ts";
 import { REPO_SCOUT_PROMPT, SESSION_SCOUT_PROMPT, WEB_SCOUT_PROMPT } from "../src/prompts.ts";
-import { capText, SCOUT_REPORT_MAX_BYTES } from "../src/result.ts";
+import { capReport, capText, SCOUT_REPORT_MAX_BYTES } from "../src/result.ts";
 import { scoutChildEnv } from "../src/child-env.ts";
 import { runPi, type ScoutActivity, type ScoutRun } from "../src/runner.ts";
 import {
@@ -445,7 +445,7 @@ export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
           },
         });
         // Include any failure wrapper in the same hard report budget as child output.
-        const text = capText(repoResult(run.text, run.error), SCOUT_REPORT_MAX_BYTES).text;
+        const text = capReport(repoResult(run.text, run.error), SCOUT_REPORT_MAX_BYTES).text;
         return {
           content: [{ type: "text" as const, text }],
           details: {

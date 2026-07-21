@@ -55,20 +55,40 @@ test("snapshot excludes raw tool and bash output", () => {
   assert.doesNotMatch(snapshot.text, /noisy tool output|noisy bash output/);
 });
 
-test("advisor request has a 2k-token head-tail cap", () => {
-  const snapshot = buildSnapshot("system", [{ role: "custom", customType: "advisor-request", content: `START-${"alpha ".repeat(2_000)}-MIDDLE-${"omega ".repeat(2_000)}-END` }], 100_000);
+test("snapshot keeps complete advisor and user records without per-section clipping", () => {
+  const snapshot = buildSnapshot("system", [
+    { role: "custom", customType: "advisor-request", content: `START-${"alpha ".repeat(2_000)}-MIDDLE-${"omega ".repeat(2_000)}-END` },
+    { role: "user", content: `USER-START-${"beta ".repeat(7_000)}-USER-MIDDLE-${"gamma ".repeat(7_000)}-USER-END` },
+  ], 100_000);
   assert.match(snapshot.text, /START-/);
+  assert.match(snapshot.text, /-MIDDLE-/);
   assert.match(snapshot.text, /-END/);
-  assert.doesNotMatch(snapshot.text, /-MIDDLE-/);
-  assert.match(snapshot.text, /advisor-request truncated: middle omitted/);
+  assert.match(snapshot.text, /USER-MIDDLE/);
+  assert.doesNotMatch(snapshot.text, /truncated: middle omitted/);
 });
 
-test("latest user request has a 4k-token head-tail cap", () => {
-  const snapshot = buildSnapshot("system", [{ role: "user", content: `START-${"alpha ".repeat(7_000)}-MIDDLE-${"omega ".repeat(7_000)}-END` }], 100_000);
-  assert.match(snapshot.text, /START-/);
-  assert.match(snapshot.text, /-END/);
-  assert.doesNotMatch(snapshot.text, /-MIDDLE-/);
-  assert.match(snapshot.text, /latest-user-request truncated: middle omitted/);
+test("snapshot omits oversized records whole and keeps later records", () => {
+  const snapshot = buildSnapshot("system", [
+    { role: "custom", customType: "advisor-request", content: "review" },
+    { role: "custom", customType: "advisor-evidence", content: `EVIDENCE-START${"x".repeat(30_000)}EVIDENCE-END` },
+    { role: "custom", customType: "pi-continuity", content: "small durable state" },
+  ], 10_000);
+  assert.doesNotMatch(snapshot.text, /EVIDENCE-START|EVIDENCE-END/);
+  assert.match(snapshot.text, /small durable state/);
+  assert.equal(snapshot.truncated, true);
+  assert.equal(snapshot.requiredContextOmitted, false);
+});
+
+test("snapshot reports required context that cannot fit instead of clipping it", () => {
+  const messages = [{ role: "custom", customType: "advisor-request", content: "review" }];
+  const oversized = buildSnapshot("system", [
+    { role: "custom", customType: "advisor-request", content: "x".repeat(10_000) },
+  ], 1_000);
+  const reserved = buildSnapshot("system", messages, 10_000, 8_000);
+  assert.equal(oversized.text, "");
+  assert.equal(oversized.requiredContextOmitted, true);
+  assert.equal(reserved.text, "");
+  assert.equal(reserved.requiredContextOmitted, true);
 });
 
 test("snapshot redacts advisor request", () => {

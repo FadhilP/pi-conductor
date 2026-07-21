@@ -34,12 +34,12 @@ Evidence is limited to five workspace-relative regular text files, 200 lines per
 
 ## Context and Limits
 
-Input priority is the executor request, explicit workspace evidence, pi-continuity state, latest bounded Verify metadata, compaction or branch summaries, latest user request, latest non-empty assistant text, then system instructions. Raw tool and shell results are excluded. Advisor requests use an estimated 2,048-token cap; latest user requests use head-and-tail retention under an estimated 4,096-token cap.
+Input priority is the executor request, explicit workspace evidence, pi-continuity state, latest bounded Verify metadata, compaction or branch summaries, latest user request, latest non-empty assistant text, then system instructions. Raw tool and shell results are excluded. Records are never clipped: complete prioritized records are packed under the global input budget, while records that do not fit are omitted. Required Advisor request and system context fail nonfatally instead of being clipped when they cannot fit.
 
-Calls use context-window-aware budgets with an estimated 32,768-token total input cap. Output is capped at an estimated 8,192 tokens. Calls time out after 15 minutes and fail nonfatally.
+Calls use context-window-aware budgets with an estimated 32,768-token total input cap. Output is capped at an estimated 8,192 tokens and may be lowered by the cost preflight. Calls time out after 15 minutes and fail nonfatally.
 
 ## Security and Cost
 
-Every call costs the selected model's rates. UI reports provider usage, cache reads and writes, and total cost. Long cache retention follows `PI_CACHE_RETENTION=long`; savings are never assumed.
+Every call costs the selected model's rates. Advisor applies a $0.50 estimated-cost ceiling per call: model pricing and estimated uncached input cost determine the maximum output tokens, and calls fail nonfatally when estimated input alone exhausts the budget. Provider tokenization, retries, and reported pricing can differ, so this limits estimated cost rather than guaranteeing final billing. UI reports provider usage, cache reads and writes, and total cost. Long cache retention follows `PI_CACHE_RETENTION=long`; savings are never assumed.
 
 Snapshot redaction is defense in depth, not proof of secrecy. The package stores only model choice; snapshots remain in memory and never enter tool details. Advice persists as a normal tool result. Pi packages run with full user permissions; review source before installation.

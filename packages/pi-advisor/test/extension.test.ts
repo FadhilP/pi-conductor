@@ -20,6 +20,7 @@ test("parallel Advisor calls serialize and report running duration", async () =>
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const prompts: string[] = [];
   const sessionIds: string[] = [];
+  const maxTokens: number[] = [];
   let runningUpdate: any;
   let reportDuration!: () => void;
   const durationReported = new Promise<void>((resolve) => { reportDuration = resolve; });
@@ -35,6 +36,7 @@ test("parallel Advisor calls serialize and report running duration", async () =>
     maxActive = Math.max(maxActive, active);
     prompts.push(request.messages[0].content[0].text);
     sessionIds.push(options.sessionId);
+    maxTokens.push(options.maxTokens);
     if (calls === 1) {
       firstStarted();
       await firstGate;
@@ -67,7 +69,10 @@ test("parallel Advisor calls serialize and report running duration", async () =>
   assert.match(guidance, /concrete decision, risk, or approach to review/);
   assert.match(guidance, /only the highest-priority cited file ranges/);
   assert.match(guidance, /main model decides, verifies evidence, and performs tools/);
-  const model = { provider: "test", id: "model", contextWindow: 32_000 };
+  const model = {
+    provider: "test", id: "model", contextWindow: 32_000, maxTokens: 8_192,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  };
   const ctx = {
     cwd: process.cwd(), hasUI: false, getSystemPrompt: () => "system",
     modelRegistry: {
@@ -88,6 +93,7 @@ test("parallel Advisor calls serialize and report running duration", async () =>
     assert.equal(maxActive, 1);
     assert.equal(calls, 2);
     assert.deepEqual(sessionIds, ["session:advisor", "session:advisor"]);
+    assert.deepEqual(maxTokens, [8_000, 8_000]);
     assert.equal(results[0].details.callNumber, 1);
     assert.equal(results[1].details.callNumber, 2);
     assert.match(prompts[1], /Prior guidance:\n\nadvice 1/);
