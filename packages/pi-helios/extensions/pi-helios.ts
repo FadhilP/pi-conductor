@@ -158,8 +158,19 @@ export default function heliosExtension(pi: ExtensionAPI) {
     })());
   });
   let ownedHeaded = true;
-  pi.on("session_start", () => { ownedHeaded = true; });
+  pi.on("session_start", () => {
+    ownedHeaded = true;
+    pi.events.emit("pylon:tool-policy", {
+      version: 1,
+      kind: "register",
+      owner: "pi-helios",
+      managedTools: ["helios_browser", "helios_capture"],
+      enabledTools: ["helios_browser", "helios_capture"],
+      deferredTools: ["helios_browser", "helios_capture"],
+    });
+  });
   pi.on("session_shutdown", async (_event, ctx) => {
+    pi.events.emit("pylon:tool-policy", { version: 1, kind: "unregister", owner: "pi-helios" });
     disposeWebScoutCapability();
     disposeHealth();
     const summary = await manager.shutdown();

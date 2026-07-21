@@ -97,8 +97,8 @@ test("continuity and memory guidance stay dedicated", () => {
   assert.match(guidance, /Verification is a gate, not a separate todo by default/i);
   assert.match(guidance, /keep verification out of new todo lists/i);
   assert.match(guidance, /bulk-complete finished implementation todos/i);
-  assert.match(guidance, /existing final todo that includes verification/i);
-  assert.match(guidance, /run Verify first, then mark that todo done in a tool-only turn/i);
+  assert.match(guidance, /sole remaining verification-only todo/i);
+  assert.match(guidance, /marked done automatically when Verify passes/i);
   assert.match(guidance, /every nonterminal continuity update tool-only and before final text/i);
   assert.match(guidance, /never narrate progress before calling it/i);
   assert.match(guidance, /exactly one evidence-aware text-only final response/i);
@@ -263,6 +263,44 @@ test("automatic completion waits for required verification", async () => {
     blocked = await tool.execute("complete", { action: "state", completion: true }, undefined, undefined, ctx);
     assert.match(blocked.content[0].text, /already completed/i);
     assert.equal(blocked.terminate, true);
+  } finally {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+  }
+});
+
+test("passing Verify completes a sole remaining verification todo", async () => {
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const root = await mkdtemp(join(tmpdir(), "continuity-extension-verification-todo-"));
+  const cwd = join(root, "repo");
+  await mkdir(cwd);
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  const ctx: any = {
+    cwd, hasUI: false, mode: "json",
+    sessionManager: { getSessionId: () => "verification-todo", getEntries: () => [] },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
+  };
+  try {
+    const app = runtime();
+    for (const handler of app.handlers.get("session_start") ?? []) await handler({}, ctx);
+    const tool = app.tools.get("continuity_update");
+    await tool.execute("plan", {
+      action: "set_plan", goal: "Ship", todos: ["Implement change", "Run final verification"],
+    }, undefined, undefined, ctx);
+    await tool.execute("done", {
+      action: "todo", todoId: "todo_1", status: "done", nextTodoId: "todo_2",
+    }, undefined, undefined, ctx);
+    for (const handler of app.handlers.get("tool_call") ?? [])
+      await handler({ toolName: "edit", input: {} }, ctx);
+
+    app.emit("pi-verify:result", { version: 1, cwd, state: "passed", runId: "passed", results: [] });
+    const context = await app.handlers.get("context")?.[0]({ messages: [] }, ctx);
+    assert.doesNotMatch(context.messages.at(-1).content, /Todo todo_2/);
+
+    await app.handlers.get("message_end")?.[0]?.({ message: {
+      role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done" }],
+    } }, ctx);
+    assert.equal(await app.handlers.get("context")?.[0]({ messages: [] }, ctx), undefined);
   } finally {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
@@ -693,7 +731,7 @@ test("read-only execution completion skips Verify", async () => {
   }
 });
 
-test("bash requires Verify only when its Git worktree changes", async () => {
+test("shell tools require Verify only when the Git worktree changes", async () => {
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   const root = await mkdtemp(join(tmpdir(), "continuity-extension-bash-"));
   const cwd = join(root, "repo");
@@ -711,16 +749,19 @@ test("bash requires Verify only when its Git worktree changes", async () => {
     ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {} },
   });
   try {
-    for (const [sessionId, mutate] of [["read-only", false], ["changed", true]] as const) {
+    for (const [sessionId, mutate, toolName] of [
+      ["read-only-bash", false, "bash"],
+      ["changed-bash", true, "bash"],
+    ] as const) {
       const app = runtime(), ctx = context(sessionId);
       for (const handler of app.handlers.get("session_start") ?? []) await handler({}, ctx);
       const tool = app.tools.get("continuity_update");
       await tool.execute("plan", { action: "set_plan", goal: "Run command", todos: ["Finish"] }, undefined, undefined, ctx);
       for (const handler of app.handlers.get("tool_call") ?? [])
-        await handler({ toolName: "bash", toolCallId: `bash-${sessionId}`, input: { command: "test" } }, ctx);
+        await handler({ toolName, toolCallId: `${toolName}-${sessionId}`, input: { command: "test" } }, ctx);
       if (mutate) await writeFile(join(cwd, "tracked.txt"), "changed\n");
       for (const handler of app.handlers.get("tool_result") ?? [])
-        await handler({ toolName: "bash", toolCallId: `bash-${sessionId}`, input: { command: "test" }, content: [], details: {}, isError: false }, ctx);
+        await handler({ toolName, toolCallId: `${toolName}-${sessionId}`, input: { command: "test" }, content: [], details: {}, isError: false }, ctx);
       await tool.execute("done", { action: "todo", todoId: "todo_1", status: "done" }, undefined, undefined, ctx);
       const result = await tool.execute("complete", { action: "state", completion: true }, undefined, undefined, ctx);
       assert.match(result.content[0].text, mutate ? /Cannot complete until/ : /Work completed/);

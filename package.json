@@ -27,7 +27,7 @@
       "./packages/pi-grunt/extensions/pi-grunt.ts",
       "./packages/pi-heartbeat/extensions/pi-heartbeat.ts",
       "./packages/pi-helios/extensions/pi-helios.ts",
-      "./packages/pi-scout/extensions/search-tools.ts",
+      "./packages/pi-discover/extensions/pi-discover.ts",
       "./packages/pi-scout/extensions/pi-scout.ts",
       "./packages/pi-sieve/extensions/pi-sieve.ts",
       "./packages/pi-timeline/extensions/pi-timeline.ts",

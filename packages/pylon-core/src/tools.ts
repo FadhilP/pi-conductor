@@ -4,6 +4,7 @@ export type ToolPolicy = {
   owner: string;
   managedTools: string[];
   enabledTools: string[];
+  deferredTools?: string[];
   allowOnly?: string[];
 };
 export type ToolPolicyMessage = ToolPolicy & {
@@ -43,6 +44,10 @@ export function parseToolMessage(value: unknown):
   const enabledTools = input.enabledTools;
   if (!enabledTools.every((tool) => managedTools.includes(tool)))
     return { error: "enabledTools must be a subset of managedTools" };
+  if (input.deferredTools !== undefined && !stringList(input.deferredTools))
+    return { error: "deferredTools must contain unique non-empty strings" };
+  if (input.deferredTools && !input.deferredTools.every((tool) => enabledTools.includes(tool)))
+    return { error: "deferredTools must be a subset of enabledTools" };
   if (input.allowOnly !== undefined && !stringList(input.allowOnly))
     return { error: "allowOnly must contain unique non-empty strings" };
   if (input.restoreTools !== undefined && !stringList(input.restoreTools))
@@ -56,6 +61,7 @@ export function parseToolMessage(value: unknown):
       owner: input.owner,
       managedTools: [...managedTools],
       enabledTools: [...enabledTools],
+      ...(input.deferredTools ? { deferredTools: [...input.deferredTools] } : {}),
       ...(input.allowOnly ? { allowOnly: [...input.allowOnly] } : {}),
       ...(input.restoreTools ? { restoreTools: [...input.restoreTools] } : {}),
       ...(input.acknowledge ? { acknowledge: input.acknowledge as () => void } : {}),
@@ -66,11 +72,16 @@ export function parseToolMessage(value: unknown):
 export function reconcileTools(
   baseline: Iterable<string>,
   policies: Iterable<ToolPolicy>,
+  selectedTools: Iterable<string> = [],
 ): string[] {
   const result = new Set(baseline);
   const list = [...policies];
-  for (const policy of list)
-    for (const tool of policy.enabledTools) result.add(tool);
+  for (const policy of list) {
+    const deferred = new Set(policy.deferredTools ?? []);
+    for (const tool of policy.enabledTools)
+      if (!deferred.has(tool)) result.add(tool);
+  }
+  for (const tool of selectedTools) result.add(tool);
   for (const policy of list) {
     if (!policy.allowOnly) continue;
     const allowed = new Set(policy.allowOnly);

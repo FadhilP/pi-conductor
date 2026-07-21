@@ -1,13 +1,13 @@
 {
-  "name": "pi-scout",
+  "name": "pi-discover",
   "version": "0.1.0",
-  "description": "Bounded repository, isolated public-web, and explicit Pi-session scouts for Pi",
+  "description": "General-purpose search and coordinated inactive-tool discovery for Pi",
   "type": "module",
   "keywords": ["pi-package"],
   "engines": { "node": ">=22.18.0" },
-  "files": ["extensions", "src", "README.md", "LICENSE"],
+  "files": ["extensions", "README.md", "LICENSE"],
   "scripts": { "test": "node --test test/*.test.ts", "check": "tsc --noEmit" },
-  "pi": { "extensions": ["./extensions/pi-scout.ts"] },
+  "pi": { "extensions": ["./extensions/pi-discover.ts"] },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",

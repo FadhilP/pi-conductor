@@ -46,7 +46,13 @@ async function withLock<T>(root: string, task: () => Promise<T>): Promise<T> {
       throw error;
     }
     try {
-      const active = await readJson(lock);
+      let active: unknown;
+      try {
+        active = JSON.parse(await readFile(lock, "utf8"));
+      } catch (error: any) {
+        if (error?.code === "ENOENT") return true;
+        throw Error("Unreadable continuity session-artifact lock.");
+      }
       if (!isLockOwner(active)) throw Error("Unreadable continuity session-artifact lock.");
       if (processIsAlive(active.pid)) return false;
       await rm(lock, { force: true });

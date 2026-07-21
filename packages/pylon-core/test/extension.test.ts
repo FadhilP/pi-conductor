@@ -1,9 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import extension from "../extensions/pylon-core.ts";
+
+const exec = promisify(execFile);
 
 class Bus {
   handlers = new Map<string, Set<(value: unknown) => void>>();
@@ -96,6 +100,39 @@ test("extension validates, unregisters, diagnoses, and cleans listener", async (
   assert.equal(runtime.events.count("pi-guard:decision"), 0);
 });
 
+test("shared worktree observer fingerprints one shell tool batch per turn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pylon-worktree-observer-"));
+  await exec("git", ["init", "-q"], { cwd: root });
+  await exec("git", ["config", "user.email", "pylon@test.local"], { cwd: root });
+  await exec("git", ["config", "user.name", "pylon-test"], { cwd: root });
+  await writeFile(join(root, "tracked.txt"), "base\n");
+  await exec("git", ["add", "tracked.txt"], { cwd: root });
+  await exec("git", ["commit", "-qm", "base"], { cwd: root });
+
+  const runtime = harness();
+  let capability: any;
+  runtime.events.emit("pylon:worktree-observer-request", {
+    version: 1,
+    respond: (value: any) => { capability = value; },
+  });
+  assert.deepEqual(capability, { version: 1, owner: "pylon-core" });
+  const changes: any[] = [];
+  runtime.events.on("pylon:worktree-change", (event) => changes.push(event));
+  const ctx = { cwd: root };
+  const toolCall = runtime.handlers.get("tool_call")![0];
+  await Promise.all([
+    toolCall({ toolName: "bash", toolCallId: "one" }, ctx),
+    toolCall({ toolName: "bash", toolCallId: "two" }, ctx),
+  ]);
+  await writeFile(join(root, "tracked.txt"), "changed\n");
+  await runtime.handlers.get("turn_end")![0]({}, ctx);
+
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].changed, true);
+  assert.equal(changes[0].known, true);
+  assert.deepEqual(changes[0].toolCallIds, ["one", "two"]);
+});
+
 test("doctor reports quarantined state and unavailable configured models", async () => {
   const previous = process.env.PI_CODING_AGENT_DIR;
   const root = await mkdtemp(join(tmpdir(), "pylon-doctor-"));
@@ -169,6 +206,65 @@ test("tools command manages baseline while restrictive gates remain authoritativ
   await runtime.commands.get("pylon").handler("tools status", ctx);
   assert.match(message, /Baseline:/);
   assert.match(message, /Effective:/);
+});
+
+test("discovery capability replaces deferred selections and respects gates", () => {
+  const runtime = harness();
+  runtime.events.emit("pylon:tool-policy", {
+    version: 1, kind: "register", owner: "pi-advisor",
+    managedTools: ["advisor"], enabledTools: ["advisor"], deferredTools: ["advisor"],
+  });
+  runtime.events.emit("pylon:tool-policy", {
+    version: 1, kind: "register", owner: "pi-scout",
+    managedTools: ["repo_scout"], enabledTools: ["repo_scout"], deferredTools: ["repo_scout"],
+  });
+  assert.ok(!runtime.active().includes("advisor"));
+  assert.ok(!runtime.active().includes("repo_scout"));
+
+  const responses: any[] = [];
+  runtime.events.emit("pylon:tool-discovery", { version: 1, respond: (value: any) => responses.push(value) });
+  assert.equal(responses.length, 1);
+  const capability = responses[0];
+  assert.deepEqual(capability.eligible(), ["advisor", "repo_scout"]);
+  assert.deepEqual(capability.select(["advisor"]), { selected: ["advisor"], blocked: [] });
+  assert.ok(runtime.active().includes("advisor"));
+  assert.ok(!runtime.active().includes("repo_scout"));
+  capability.select(["repo_scout"]);
+  assert.ok(!runtime.active().includes("advisor"));
+  assert.ok(runtime.active().includes("repo_scout"));
+
+  runtime.events.emit("pylon:tool-policy", {
+    version: 1, kind: "register", owner: "pi-continuity",
+    managedTools: [], enabledTools: [], allowOnly: ["read"],
+  });
+  assert.deepEqual(capability.select(["advisor"]), { selected: ["advisor"], blocked: ["advisor"] });
+  assert.ok(!runtime.active().includes("advisor"));
+  assert.match(capability.select(["missing"]).error, /not eligible/);
+  assert.deepEqual(capability.reset(), { selected: [] });
+});
+
+test("discovery selection validation and failed reconciliation preserve prior selection", () => {
+  const runtime = harness();
+  runtime.events.emit("pylon:tool-policy", {
+    version: 1, kind: "register", owner: "pi-advisor",
+    managedTools: ["advisor"], enabledTools: ["advisor"], deferredTools: ["advisor"],
+  });
+  const responses: any[] = [];
+  runtime.events.emit("pylon:tool-discovery", { version: 1, respond: (value: any) => responses.push(value) });
+  const capability = responses[0];
+  assert.doesNotThrow(() => capability.select([Symbol("bad")]));
+  assert.match(capability.select([Symbol("bad")]).error, /non-empty tool names/);
+  capability.select(["advisor"]);
+  assert.ok(runtime.active().includes("advisor"));
+
+  runtime.fail(true);
+  runtime.events.emit("pylon:tool-policy", {
+    version: 1, kind: "unregister", owner: "pi-advisor",
+  });
+  runtime.fail(false);
+  assert.ok(runtime.active().includes("advisor"));
+  assert.deepEqual(capability.eligible(), ["advisor"]);
+  assert.deepEqual(capability.select(["advisor"]), { selected: ["advisor"], blocked: [] });
 });
 
 test("tokens command rebuilds branch usage and tracks custom tool results", async () => {

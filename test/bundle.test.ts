@@ -11,7 +11,7 @@ import guard from "../packages/pi-guard/extensions/pi-guard.ts";
 import grunt from "../packages/pi-grunt/extensions/pi-grunt.ts";
 import heartbeat from "../packages/pi-heartbeat/extensions/pi-heartbeat.ts";
 import helios from "../packages/pi-helios/extensions/pi-helios.ts";
-import searchTools from "../packages/pi-scout/extensions/search-tools.ts";
+import discover from "../packages/pi-discover/extensions/pi-discover.ts";
 import scout from "../packages/pi-scout/extensions/pi-scout.ts";
 import sieve from "../packages/pi-sieve/extensions/pi-sieve.ts";
 import timeline from "../packages/pi-timeline/extensions/pi-timeline.ts";
@@ -59,7 +59,7 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
     "./packages/pi-grunt/extensions/pi-grunt.ts",
     "./packages/pi-heartbeat/extensions/pi-heartbeat.ts",
     "./packages/pi-helios/extensions/pi-helios.ts",
-    "./packages/pi-scout/extensions/search-tools.ts",
+    "./packages/pi-discover/extensions/pi-discover.ts",
     "./packages/pi-scout/extensions/pi-scout.ts",
     "./packages/pi-sieve/extensions/pi-sieve.ts",
     "./packages/pi-timeline/extensions/pi-timeline.ts",
@@ -84,6 +84,7 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
       registerCommand: (name: string, command: any) => commands.set(name, command),
       registerEntryRenderer: (name: string, renderer: any) => renderers.set(name, renderer),
       getActiveTools: () => [...new Set(active)],
+      getAllTools: () => [...tools.values()],
       setActiveTools: (tools: string[]) => { active = [...tools]; },
       getThinkingLevel: () => "low",
       setThinkingLevel: () => {},
@@ -94,14 +95,14 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
       sendUserMessage: () => {},
       exec: async () => ({ code: 0, stdout: "", stderr: "" }),
     };
-    [advisor, pylon, continuity, focus, guard, grunt, heartbeat, helios, searchTools, scout, sieve, timeline, verify]
+    [advisor, pylon, continuity, focus, guard, grunt, heartbeat, helios, discover, scout, sieve, timeline, verify]
       .forEach((extension) => extension(pi));
 
     assert.deepEqual([...commands.keys()].sort(), [
       "advisor", "continuity", "grunt", "guard", "heartbeat", "helios-doctor", "helios-visibility", "memory", "plan", "pylon", "scout", "sieve", "timeline", "todos", "tokens", "ui",
     ]);
     assert.deepEqual([...tools.keys()].sort(), [
-      "advisor", "continuity_update", "fd", "grunt", "heartbeat_cancel", "heartbeat_start", "heartbeat_status", "helios_browser", "helios_capture", "memory", "repo_scout", "rg", "sieve_recall", "verify", "web_scout",
+      "advisor", "continuity_update", "fd", "grunt", "heartbeat_cancel", "heartbeat_start", "heartbeat_status", "helios_browser", "helios_capture", "memory", "repo_scout", "rg", "search_tools", "sieve_recall", "verify", "web_scout",
     ]);
     assert.ok(renderers.has("pi-scout-session"));
 
@@ -116,13 +117,25 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
       },
     };
     for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
+    assert.ok(active.includes("search_tools"));
     assert.ok(active.includes("continuity_update"));
     assert.ok(active.includes("memory"));
     assert.ok(!active.includes("grunt"));
     assert.ok(!active.includes("repo_scout"));
     assert.ok(!active.includes("web_scout"));
     assert.ok(!active.includes("advisor"));
+    assert.ok(!active.includes("helios_browser"));
+    assert.ok(!active.includes("helios_capture"));
     assert.ok(events.count() > 0);
+    const discoveryResult = await tools.get("search_tools").execute(
+      "discover-browser",
+      { query: "browser navigation" },
+      undefined,
+      undefined,
+      ctx,
+    );
+    assert.match(discoveryResult.content[0].text, /Activated: helios_browser/);
+    assert.ok(active.includes("helios_browser"));
     await commands.get("pylon").handler("doctor", ctx);
     assert.match(notification, /Package health:/);
     assert.match(notification, /Helios:/);

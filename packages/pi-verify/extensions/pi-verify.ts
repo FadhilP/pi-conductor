@@ -9,6 +9,7 @@ import { Type } from "typebox";
 import { detectChecks } from "../src/detect.ts";
 
 const HEARTBEAT_MS = 1_000;
+const MAX_PARALLEL_DIRECTORIES = 4;
 
 type Result = {
   id: string;
@@ -228,19 +229,29 @@ export default function verifyExtension(pi: ExtensionAPI) {
         return { content: [{ type: "text" as const, text: `${details.skipped}${hygiene ? `\n\n${hygieneText(hygiene)}` : ""}` }], details };
       }
 
-      const results: Result[] = [];
+      const indexedResults: Array<{ index: number; result: Result }> = [];
       const runStarted = Date.now();
-      for (const [index, check] of checks.entries()) {
-        if (signal?.aborted) break;
-        const progress = `Verify: Running ${index + 1}/${checks.length}`;
+      const checkIndexes = new Map(checks.map((check, index) => [check.id, index]));
+      const groups = new Map<string, typeof checks>();
+      for (const check of checks) groups.set(check.cwd, [...(groups.get(check.cwd) ?? []), check]);
+      let nextGroup = 0;
+      let startedChecks = 0;
+      let stopped = false;
+      const orderedResults = () => indexedResults
+        .slice()
+        .sort((a, b) => a.index - b.index)
+        .map((item) => item.result);
+      const runCheck = async (check: (typeof checks)[number]) => {
+        const displayIndex = ++startedChecks;
+        const progress = `Verify: Running ${displayIndex}/${checks.length}`;
         if (ctx.hasUI) ctx.ui.setStatus("pi-verify", progress);
         pi.events.emit("pi-verify:lifecycle", {
           version: 1, runId, cwd: ctx.cwd, scope: params.scope, state: "running",
-          worktreeId: initialIdentity, startedAt, completed: index, total: checks.length,
+          worktreeId: initialIdentity, startedAt, completed: indexedResults.length, total: checks.length,
         });
         onUpdate?.({
-          content: [{ type: "text", text: `Running ${index + 1}/${checks.length}: ${check.label}` }],
-          details: { scope: params.scope, runId, state: "running", worktreeId: initialIdentity, startedAt, results },
+          content: [{ type: "text", text: `Running ${displayIndex}/${checks.length}: ${check.label}` }],
+          details: { scope: params.scope, runId, state: "running", worktreeId: initialIdentity, startedAt, results: orderedResults() },
         });
         const started = Date.now();
         const heartbeat = setInterval(() => {
@@ -248,7 +259,7 @@ export default function verifyExtension(pi: ExtensionAPI) {
           if (ctx.hasUI) ctx.ui.setStatus("pi-verify", `${progress} · ${(durationMs / 1000).toFixed(0)}s`);
           onUpdate?.({
             content: [{ type: "text", text: `${(durationMs / 1000).toFixed(0)}s` }],
-            details: { scope: params.scope, runId, state: "running", worktreeId: initialIdentity, startedAt, durationMs, results },
+            details: { scope: params.scope, runId, state: "running", worktreeId: initialIdentity, startedAt, durationMs, results: orderedResults() },
           });
         }, HEARTBEAT_MS);
         heartbeat.unref();
@@ -269,17 +280,36 @@ export default function verifyExtension(pi: ExtensionAPI) {
         })();
         const raw = [execution.stdout, execution.stderr].filter(Boolean).join("\n");
         const bounded = truncateTail(raw, { maxLines: 160, maxBytes: 12 * 1024 });
-        results.push({
-          id: check.id,
-          label: check.label,
-          command: [check.command, ...check.args].join(" "),
-          code: execution.code,
-          output: bounded.content.trim(),
-          truncated: bounded.truncated,
-          durationMs: Date.now() - started,
+        indexedResults.push({
+          index: checkIndexes.get(check.id)!,
+          result: {
+            id: check.id,
+            label: check.label,
+            command: [check.command, ...check.args].join(" "),
+            code: execution.code,
+            output: bounded.content.trim(),
+            truncated: bounded.truncated,
+            durationMs: Date.now() - started,
+          },
         });
-        if (execution.code !== 0) break;
-      }
+        if (execution.code !== 0) stopped = true;
+      };
+      const queues = [...groups.values()];
+      const worker = async () => {
+        while (!stopped && !signal?.aborted) {
+          const group = queues[nextGroup++];
+          if (!group) return;
+          for (const check of group) {
+            if (stopped || signal?.aborted) return;
+            await runCheck(check);
+          }
+        }
+      };
+      await Promise.all(Array.from(
+        { length: Math.min(MAX_PARALLEL_DIRECTORIES, queues.length) },
+        () => worker(),
+      ));
+      const results = orderedResults();
 
       const passed = results.length === checks.length && results.every((result) => result.code === 0);
       const summary = results
@@ -295,7 +325,8 @@ export default function verifyExtension(pi: ExtensionAPI) {
             : passed
               ? "passed"
               : "failed";
-      const unrunChecks = checks.slice(results.length).map((check) => check.id);
+      const completedIds = new Set(results.map((result) => result.id));
+      const unrunChecks = checks.filter((check) => !completedIds.has(check.id)).map((check) => check.id);
       const details: Details = {
         scope: params.scope, runId, state, worktreeId: finalIdentity,
         initialWorktreeId: initialIdentity, startedAt, finishedAt: new Date().toISOString(),

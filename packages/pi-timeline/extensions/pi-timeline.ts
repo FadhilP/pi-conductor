@@ -126,11 +126,22 @@ export default function timelineExtension(
     activeRun: RunEntry | undefined,
     latestVerification: any,
     pendingBash = new Map<string, string | undefined>(),
+    sharedWorktreeObserver = false,
     automaticMutation = false,
     releaseSessionLease: ((cleanupIfLast?: boolean) => Promise<void>) | undefined,
     ephemeralSession = false,
     currentSessionId = "",
     lastCtx: any;
+  pi.events.emit?.("pylon:worktree-observer-request", {
+    version: 1,
+    respond: (value: any) => {
+      if (value?.version === 1 && value.owner === "pylon-core") sharedWorktreeObserver = true;
+    },
+  });
+  const disposeWorktreeChange = pi.events.on("pylon:worktree-change", (event: any) => {
+    if (sharedWorktreeObserver && event?.version === 1 && event.cwd === lastCtx?.cwd && event.changed === true)
+      automaticMutation = true;
+  });
   const artifactRoot = options.artifactRoot ?? join(getAgentDir(), "pi-timeline");
   const key = (sessionId: string, entryId: string) => `${sessionId}:${entryId}`;
   const nameSession = async (ctx: any) => {
@@ -381,6 +392,7 @@ export default function timelineExtension(
     namingInFlight = undefined;
     disposeVerify();
     disposeCheckpoint();
+    disposeWorktreeChange();
     await releaseSessionLease?.(ephemeralSession);
     releaseSessionLease = undefined;
     currentSessionId = "";
@@ -392,11 +404,11 @@ export default function timelineExtension(
     if (event.source !== "extension") paired = false;
   });
   pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName === "bash")
+    if (event.toolName === "bash" && !sharedWorktreeObserver)
       pendingBash.set(event.toolCallId, await worktreeFingerprint(ctx.cwd));
   });
   pi.on("tool_result", async (event, ctx) => {
-    if (event.toolName === "bash") {
+    if (event.toolName === "bash" && !sharedWorktreeObserver) {
       const before = pendingBash.get(event.toolCallId);
       pendingBash.delete(event.toolCallId);
       const after = await worktreeFingerprint(ctx.cwd);

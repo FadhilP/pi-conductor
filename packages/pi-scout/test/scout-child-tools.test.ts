@@ -3,19 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import registerSearchTools, { boundedSearch, SCOUT_TOOL_MAX_BYTES, workspacePath } from "../extensions/search-tools.ts";
+import registerScoutChildTools, { boundedSearch, SCOUT_TOOL_MAX_BYTES, workspacePath } from "../src/scout-child-tools.ts";
 
-const previousChild = process.env.PI_SCOUT_CHILD;
-process.env.PI_SCOUT_CHILD = "1";
-test.after(() => {
-  if (previousChild === undefined) delete process.env.PI_SCOUT_CHILD;
-  else process.env.PI_SCOUT_CHILD = previousChild;
-});
-
-test("main registration keeps child-only tools out of the main model", () => {
+test("child entrypoint registers exactly its bounded child tools", () => {
   const tools = new Map<string, any>();
-  registerSearchTools({ registerTool(tool: any) { tools.set(tool.name, tool); } } as any, false);
-  assert.deepEqual([...tools.keys()], ["rg", "fd"]);
+  registerScoutChildTools({ registerTool(tool: any) { tools.set(tool.name, tool); } } as any);
+  assert.deepEqual([...tools.keys()], ["read", "search_excerpt", "rg", "fd"]);
 });
 
 test("search paths cannot escape workspace", () => {
@@ -26,7 +19,7 @@ test("search paths cannot escape workspace", () => {
 test("read override applies the child-local cap", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-scout-read-"));
   const tools = new Map<string, any>();
-  registerSearchTools({ registerTool(tool: any) { tools.set(tool.name, tool); } } as any);
+  registerScoutChildTools({ registerTool(tool: any) { tools.set(tool.name, tool); } } as any);
   try {
     await writeFile(join(root, "large.txt"), "x".repeat(SCOUT_TOOL_MAX_BYTES * 2));
     const result = await tools.get("read").execute("id", { path: "large.txt" }, undefined, undefined, { cwd: root });
@@ -41,7 +34,7 @@ test("read override applies the child-local cap", async () => {
 test("rg uses argument arrays and reports no matches", async () => {
   const tools = new Map<string, any>();
   const calls: Array<{ command: string; args: string[] }> = [];
-  registerSearchTools({
+  registerScoutChildTools({
     registerTool(tool: any) { tools.set(tool.name, tool); },
     async exec(command: string, args: string[]) {
       calls.push({ command, args });
@@ -59,7 +52,7 @@ test("rg uses argument arrays and reports no matches", async () => {
 test("search_excerpt returns bounded cited context, contains paths, and falls back safely", async () => {
   const tools = new Map<string, any>();
   const calls: Array<{ command: string; args: string[] }> = [];
-  registerSearchTools({
+  registerScoutChildTools({
     registerTool(tool: any) { tools.set(tool.name, tool); },
     async exec(command: string, args: string[]) {
       calls.push({ command, args });
@@ -100,7 +93,7 @@ test("bounded search keeps context blocks intact while sampling", () => {
 
 test("search_excerpt output is capped and reports omitted results", async () => {
   const tools = new Map<string, any>();
-  registerSearchTools({
+  registerScoutChildTools({
     registerTool(tool: any) { tools.set(tool.name, tool); },
     async exec() { return { stdout: "a.ts:1:" + "x".repeat(SCOUT_TOOL_MAX_BYTES * 2), stderr: "", code: 0, killed: false }; },
   } as any);
@@ -112,7 +105,7 @@ test("search_excerpt output is capped and reports omitted results", async () => 
 test("rg files mode supports staged broad-to-focused discovery", async () => {
   const tools = new Map<string, any>();
   const calls: Array<{ command: string; args: string[] }> = [];
-  registerSearchTools({
+  registerScoutChildTools({
     registerTool(tool: any) { tools.set(tool.name, tool); },
     async exec(command: string, args: string[]) {
       calls.push({ command, args });
@@ -131,7 +124,7 @@ test("rg files mode supports staged broad-to-focused discovery", async () => {
 test("fd tries fdfind then directs model to built-in fallback", async () => {
   const tools = new Map<string, any>();
   const calls: string[] = [];
-  registerSearchTools({
+  registerScoutChildTools({
     registerTool(tool: any) { tools.set(tool.name, tool); },
     async exec(command: string) {
       calls.push(command);

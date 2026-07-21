@@ -4,6 +4,7 @@ import { mkdtemp, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pylon from "../extensions/pylon-core.ts";
+import discover from "../../pi-discover/extensions/pi-discover.ts";
 import advisor from "../../pi-advisor/extensions/pi-advisor.ts";
 import scout from "../../pi-scout/extensions/pi-scout.ts";
 import grunt from "../../pi-grunt/extensions/pi-grunt.ts";
@@ -37,6 +38,7 @@ test("actual Advisor, Grunt, Scout, and Continuity adapters coordinate end to en
     const pi: any = {
       events,
       getActiveTools: () => [...active],
+      getAllTools: () => [...tools.values()],
       setActiveTools: (tools: string[]) => { active = [...tools]; },
       getThinkingLevel: () => "low",
       setThinkingLevel: () => {},
@@ -52,7 +54,7 @@ test("actual Advisor, Grunt, Scout, and Continuity adapters coordinate end to en
       setModel: async () => true,
       exec: async () => ({ code: 0, stdout: "", stderr: "" }),
     };
-    pylon(pi); advisor(pi); grunt(pi); scout(pi); continuity(pi);
+    pylon(pi); discover(pi); advisor(pi); grunt(pi); scout(pi); continuity(pi);
     const ctx: any = {
       cwd,
       hasUI: false,
@@ -73,6 +75,7 @@ test("actual Advisor, Grunt, Scout, and Continuity adapters coordinate end to en
     assert.ok(!active.includes("repo_scout"));
     assert.ok(!active.includes("grunt"));
     assert.ok(active.includes("continuity_update"));
+    assert.ok(active.includes("memory"));
     assert.ok(!active.includes("advisor"));
     await commands.get("advisor").handler("reset", ctx);
     await commands.get("grunt").handler("reset", ctx);
@@ -80,6 +83,13 @@ test("actual Advisor, Grunt, Scout, and Continuity adapters coordinate end to en
     assert.ok(active.includes("advisor"));
     assert.ok(active.includes("grunt"));
     assert.ok(active.includes("repo_scout"));
+    assert.ok(!active.includes("web_scout"));
+    const capabilities: any[] = [];
+    events.emit("pylon:tool-discovery", { version: 1, respond: (value: any) => capabilities.push(value) });
+    assert.equal(capabilities.length, 1);
+    assert.deepEqual(capabilities[0].eligible(), ["web_scout"]);
+    capabilities[0].select(["web_scout"]);
+    assert.ok(active.includes("web_scout"));
     await commands.get("plan").handler("compatibility", ctx);
     assert.ok(active.includes("read"));
     assert.ok(active.includes("repo_scout"));

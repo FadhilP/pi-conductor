@@ -146,6 +146,40 @@ test("tool-only passing Verify remains nonterminal and reports capped check IDs 
   assert.doesNotMatch(result.content[0].text, /PASS|verbose successful command output|Changed paths/);
 });
 
+test("verify runs checks from independent child-package directories concurrently", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-verify-parallel-"));
+  for (const name of ["a", "b"]) {
+    await mkdir(join(cwd, name));
+    await writeFile(join(cwd, name, "package.json"), JSON.stringify({ scripts: { test: "node test.js" } }));
+  }
+  let tool: any;
+  let active = 0;
+  let peak = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  extension({
+    registerTool: (value: any) => { tool = value; },
+    on: () => {}, events: { emit: () => {} }, appendEntry: () => {},
+    exec: async (command: string, args: string[]) => {
+      if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: "abc\n", stderr: "" };
+      if (command === "git") return { code: 0, stdout: "", stderr: "" };
+      active++;
+      peak = Math.max(peak, active);
+      await gate;
+      active--;
+      return { code: 0, stdout: "ok\n", stderr: "" };
+    },
+  } as any);
+  const running = tool.execute("parallel", { scope: "project" }, undefined, undefined, { cwd, hasUI: false });
+  for (let attempt = 0; attempt < 100 && peak < 2; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(peak, 2);
+  release();
+  const result = await running;
+  assert.equal(result.details.state, "passed");
+  assert.deepEqual(result.details.results.map((item: any) => item.id), ["a/npm:test", "b/npm:test"]);
+});
+
 test("verify reports live elapsed runtime while a check runs", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-verify-runtime-"));
   await writeFile(join(cwd, "package.json"), JSON.stringify({ scripts: { test: "node slow.js" } }));

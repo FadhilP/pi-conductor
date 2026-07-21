@@ -11,7 +11,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 const TIMEOUT_MS = 30_000;
-/** Modest child-local cap; general host tools retain their defaults. */
+/** Modest cap for Scout's isolated child tools. */
 export const SCOUT_TOOL_MAX_BYTES = 24 * 1024;
 const MAX_MATCHES = 200;
 
@@ -122,14 +122,10 @@ async function excerptSearch(
   }
 }
 
-export default function scoutSearchToolsExtension(
-  pi: ExtensionAPI,
-  child = process.env.PI_SCOUT_CHILD === "1",
-) {
-  const maxBytes = child ? SCOUT_TOOL_MAX_BYTES : DEFAULT_MAX_BYTES;
-  if (child) {
-    const read = createReadToolDefinition(process.cwd());
-    pi.registerTool({
+export default function scoutChildToolsExtension(pi: ExtensionAPI) {
+  const maxBytes = SCOUT_TOOL_MAX_BYTES;
+  const read = createReadToolDefinition(process.cwd());
+  pi.registerTool({
       ...read,
       description: `Read workspace files with child-local output capped at ${formatSize(SCOUT_TOOL_MAX_BYTES)}. Use offset/limit for focused ranges.`,
       promptSnippet: "Read a focused workspace file range",
@@ -141,10 +137,9 @@ export default function scoutSearchToolsExtension(
           content: result.content.map((part) => part.type === "text" ? { ...part, text: bounded(part.text, SCOUT_TOOL_MAX_BYTES) } : part),
         };
       },
-    });
-  }
+  });
 
-  if (child) pi.registerTool({
+  pi.registerTool({
     name: "search_excerpt",
     label: "Search excerpts",
     description: `Read-only text search returning deterministic line-numbered matching excerpts and context in one call. Output capped at ${formatSize(SCOUT_TOOL_MAX_BYTES)}; matching results beyond the cap are reported as omitted.`,
@@ -167,9 +162,7 @@ export default function scoutSearchToolsExtension(
     label: "ripgrep",
     description: `Fast read-only content search with line numbers or matching file paths. Output capped at ${formatSize(maxBytes)}. Use grep if ripgrep is unavailable.`,
     promptSnippet: "Fast read-only repository content search with line-numbered matches or matching file paths",
-    promptGuidelines: [child
-      ? "Prefer search_excerpt for cited context. Use mode files to discover matching paths with rg; use grep when unavailable. Narrow by path/glob; refine truncated output."
-      : "Prefer rg for repository content search; use grep when unavailable. Narrow by path or glob; use mode files for broad discovery, then refine truncated output."],
+    promptGuidelines: ["Prefer search_excerpt for cited context. Use mode files to discover matching paths with rg; use grep when unavailable. Narrow by path/glob; refine truncated output."],
     parameters: Type.Object({
       pattern: Type.String({ description: "Regular expression to search" }),
       path: Type.Optional(Type.String({ description: "Workspace-relative file or directory; default ." })),
@@ -190,7 +183,7 @@ export default function scoutSearchToolsExtension(
           if (unavailable(result.stderr)) return { content: [{ type: "text" as const, text: "ripgrep unavailable; use grep instead." }], details: { unavailable: true } };
           throw new Error(`ripgrep failed (${result.code}): ${result.stderr.trim()}`);
         }
-        const text = params.mode === "files" || !child
+        const text = params.mode === "files"
           ? bounded(result.stdout, maxBytes)
           : boundedSearch(result.stdout, maxBytes);
         return { content: [{ type: "text" as const, text: text || "No matches found" }], details: { code: 0 } };

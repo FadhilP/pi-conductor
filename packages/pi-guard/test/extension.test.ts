@@ -7,16 +7,36 @@ import guard from "../extensions/pi-guard.ts";
 
 function harness() {
   const handlers = new Map<string, Function[]>();
+  const eventHandlers = new Map<string, Set<(value: any) => void>>();
   const decisions: any[] = [];
+  const events = {
+    on(name: string, handler: (value: any) => void) {
+      const values = eventHandlers.get(name) ?? new Set();
+      values.add(handler);
+      eventHandlers.set(name, values);
+      return () => values.delete(handler);
+    },
+    emit(name: string, value: any) {
+      if (name === "pi-guard:decision") decisions.push(value);
+      for (const handler of eventHandlers.get(name) ?? []) handler(value);
+    },
+  };
   const pi: any = {
-    events: { emit(name: string, value: any) { if (name === "pi-guard:decision") decisions.push(value); } },
+    events,
     on(name: string, handler: Function) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
     registerCommand() {},
   };
   guard(pi);
-  return { tool: handlers.get("tool_call")![0], user: handlers.get("user_bash")![0], decisions };
+  return {
+    tool: handlers.get("tool_call")![0],
+    user: handlers.get("user_bash")![0],
+    start: handlers.get("session_start")?.[0] ?? (() => {}),
+    shutdown: handlers.get("session_shutdown")?.[0] ?? (() => {}),
+    decisions,
+    events,
+  };
 }
 
 async function paths() {

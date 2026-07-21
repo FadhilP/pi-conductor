@@ -13,21 +13,28 @@ import {
   meterFromBranch,
   recordToolResult,
 } from "../src/token-meter.ts";
+import { worktreeFingerprint } from "../src/worktree.ts";
 
 export default function pylonCoreExtension(pi: ExtensionAPI) {
   const baseline = new Set<string>();
   const managedByOwner = new Map<string, Set<string>>();
   const policies = new Map<string, ToolPolicy>();
   const rejected: string[] = [];
+  const selectedTools = new Set<string>();
   let initialized = false;
   let lastError: string | undefined;
   let lastAcknowledgeError: string | undefined;
   let guardDiagnostic: string | undefined;
   let tokenMeter = meterFromBranch([]);
+  let shellBaseline: Promise<string | undefined> | undefined;
+  let shellCwd = "";
+  let shellToolCallIds: string[] = [];
 
   const hasGate = () => [...policies.values()].some((policy) => policy.allowOnly);
   const managedTools = () =>
     new Set([...managedByOwner.values()].flatMap((tools) => [...tools]));
+  const discoverableTools = () =>
+    new Set([...policies.values()].flatMap((policy) => policy.deferredTools ?? []));
   const captureBaseline = () => {
     if (initialized && hasGate()) return;
     const managed = managedTools();
@@ -39,7 +46,11 @@ export default function pylonCoreExtension(pi: ExtensionAPI) {
   const reconcile = () => {
     if (!initialized) captureBaseline();
     try {
-      pi.setActiveTools(reconcileTools(baseline, policies.values()));
+      const discoverable = discoverableTools();
+      const nextSelected = [...selectedTools].filter((tool) => discoverable.has(tool));
+      pi.setActiveTools(reconcileTools(baseline, policies.values(), nextSelected));
+      selectedTools.clear();
+      for (const tool of nextSelected) selectedTools.add(tool);
       lastError = undefined;
       return true;
     } catch (error: any) {
@@ -81,6 +92,7 @@ export default function pylonCoreExtension(pi: ExtensionAPI) {
       owner: message.owner,
       managedTools: [...message.managedTools],
       enabledTools: [...message.enabledTools],
+      ...(message.deferredTools ? { deferredTools: [...message.deferredTools] } : {}),
       ...(message.allowOnly ? { allowOnly: [...message.allowOnly] } : {}),
     });
     if (message.restoreTools && !hasGate()) {
@@ -111,6 +123,46 @@ export default function pylonCoreExtension(pi: ExtensionAPI) {
   const disposeGuardListener = pi.events.on("pi-guard:decision", (event: any) => {
     if (event?.version === 1)
       guardDiagnostic = `${event.decision}: ${event.reason} (blocked ${event.blocked}, confirmed ${event.confirmed})`;
+  });
+  const discoveryCapability = {
+    eligible: () => [...discoverableTools()].sort(),
+    select: (names: string[]) => {
+      if (!Array.isArray(names) || names.length > 6 || names.some((name) => typeof name !== "string" || !name) || new Set(names).size !== names.length)
+        return { error: "selection must contain at most six unique non-empty tool names" };
+      const eligible = discoverableTools();
+      const unknown = names.filter((name) => !eligible.has(name));
+      if (unknown.length) return { error: `tools are not eligible: ${unknown.join(", ")}` };
+      const previous = [...selectedTools];
+      selectedTools.clear();
+      for (const name of names) selectedTools.add(name);
+      if (!reconcile()) {
+        selectedTools.clear();
+        for (const name of previous) selectedTools.add(name);
+        return { error: lastError ?? "tool reconciliation failed" };
+      }
+      const active = new Set(pi.getActiveTools());
+      return {
+        selected: [...selectedTools],
+        blocked: [...selectedTools].filter((name) => !active.has(name)),
+      };
+    },
+    reset: () => {
+      const previous = [...selectedTools];
+      selectedTools.clear();
+      if (!reconcile()) {
+        for (const name of previous) selectedTools.add(name);
+        return { error: lastError ?? "tool reconciliation failed" };
+      }
+      return { selected: [] };
+    },
+  };
+  const disposeDiscoveryListener = pi.events.on("pylon:tool-discovery", (request: any) => {
+    if (request?.version === 1 && typeof request.respond === "function")
+      request.respond(discoveryCapability);
+  });
+  const disposeWorktreeObserverRequest = pi.events.on("pylon:worktree-observer-request", (request: any) => {
+    if (request?.version === 1 && typeof request.respond === "function")
+      request.respond({ version: 1, owner: "pylon-core" });
   });
 
   const collectHealth = async (): Promise<{ lines: string[]; warning: boolean }> => {
@@ -160,16 +212,52 @@ export default function pylonCoreExtension(pi: ExtensionAPI) {
     tokenMeter = meterFromBranch(ctx.sessionManager?.getBranch?.() ?? []);
   };
   pi.on("session_start", (_event, ctx) => {
+    selectedTools.clear();
+    shellBaseline = undefined;
+    shellCwd = "";
+    shellToolCallIds = [];
     captureBaseline();
     reconcile();
     rebuildTokenMeter(ctx);
   });
   pi.on("session_tree", (_event, ctx) => rebuildTokenMeter(ctx));
   pi.on("agent_settled", (_event, ctx) => rebuildTokenMeter(ctx));
+  pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName !== "bash") return;
+    if (!shellBaseline) {
+      shellCwd = ctx.cwd;
+      shellBaseline = worktreeFingerprint(ctx.cwd);
+    }
+    shellToolCallIds.push(event.toolCallId);
+    await shellBaseline;
+  });
   pi.on("tool_result", (event) => recordToolResult(tokenMeter, event));
+  pi.on("turn_end", async (_event, ctx) => {
+    const beforePromise = shellBaseline;
+    if (!beforePromise) return;
+    const cwd = shellCwd || ctx.cwd;
+    const toolCallIds = shellToolCallIds;
+    shellBaseline = undefined;
+    shellCwd = "";
+    shellToolCallIds = [];
+    const [before, after] = await Promise.all([beforePromise, worktreeFingerprint(cwd)]);
+    pi.events.emit("pylon:worktree-change", {
+      version: 1,
+      cwd,
+      changed: !before || !after || before !== after,
+      known: Boolean(before && after),
+      toolCallIds,
+    });
+  });
   pi.on("session_shutdown", () => {
     disposePolicyListener();
     disposeGuardListener();
+    disposeDiscoveryListener();
+    disposeWorktreeObserverRequest();
+    shellBaseline = undefined;
+    shellCwd = "";
+    shellToolCallIds = [];
+    selectedTools.clear();
     policies.clear();
     managedByOwner.clear();
   });
@@ -354,7 +442,7 @@ export default function pylonCoreExtension(pi: ExtensionAPI) {
         .sort((a, b) => a.owner.localeCompare(b.owner))
         .map(
           (policy) =>
-            `${policy.owner}: enabled [${policy.enabledTools.join(", ")}], managed [${policy.managedTools.join(", ")}]${policy.allowOnly ? `, gate [${policy.allowOnly.join(", ")}]` : ""}`,
+            `${policy.owner}: enabled [${policy.enabledTools.join(", ")}], deferred [${policy.deferredTools?.join(", ") ?? ""}], managed [${policy.managedTools.join(", ")}]${policy.allowOnly ? `, gate [${policy.allowOnly.join(", ")}]` : ""}`,
         );
       const missing = ["pi-advisor", "pi-scout", "pi-continuity"].filter(
         (owner) => !policies.has(owner),
@@ -364,6 +452,7 @@ export default function pylonCoreExtension(pi: ExtensionAPI) {
         ...(diagnosis ? ["Pylon doctor", ...diagnosis.lines, ""] : []),
         `Baseline: ${[...baseline].join(", ") || "none"}`,
         `Effective: ${pi.getActiveTools().join(", ") || "none"}`,
+        `Discovery selection: ${[...selectedTools].join(", ") || "none"}`,
         ...(policyLines.length ? policyLines : ["Policies: none"]),
         `Known adapters absent or standalone: ${missing.join(", ") || "none"}`,
         `Rejected: ${rejected.length}${rejected.length ? ` (${rejected.at(-1)})` : ""}`,

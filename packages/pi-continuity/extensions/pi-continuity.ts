@@ -62,6 +62,10 @@ import {
   RUN_ENTRY_TYPE,
   type RunEntry,
 } from "../src/run.ts";
+const isVerificationOnlyTodo = (text: string) =>
+  /\b(?:verify|verification|tests?|testing|lint|typecheck|checks?)\b/i.test(text) &&
+  !/\b(?:implement|fix|add|update|change|refactor|write|remove|migrate)\b/i.test(text);
+
 const formatPlan = (work: Work) => [
   "Plan",
   "",
@@ -130,6 +134,7 @@ export default function continuityExtension(pi: ExtensionAPI) {
     awaitingClarificationProse = false,
     recentCalls = new Map<string, number[]>(),
     pendingBash = new Map<string, string | undefined>(),
+    sharedWorktreeObserver = false,
     pendingApproval: { runId?: string; revision: number } | undefined,
     approvalContext: any,
     approvalSelectionOpen = false,
@@ -138,6 +143,17 @@ export default function continuityExtension(pi: ExtensionAPI) {
     leasedSessionId = "",
     ephemeralSession = false,
     schedulePlanApproval = (_ctx: any) => {};
+  pi.events.emit("pylon:worktree-observer-request", {
+    version: 1,
+    respond: (value: any) => {
+      if (value?.version === 1 && value.owner === "pylon-core") sharedWorktreeObserver = true;
+    },
+  });
+  const disposeWorktreeChange = pi.events.on("pylon:worktree-change", (event: any) => {
+    if (!sharedWorktreeObserver || event?.version !== 1 || event.cwd !== currentCwd || event.changed !== true) return;
+    latestVerification = undefined;
+    needsVerification = true;
+  });
   const modelName = (model: any) => `${model.provider}/${model.id}`;
   const assistantContent = (ctx: any) => {
     const entry = ctx.sessionManager?.getLeafEntry?.();
@@ -411,7 +427,17 @@ export default function continuityExtension(pi: ExtensionAPI) {
   const disposeVerify = pi.events.on("pi-verify:result", (event: any) => {
     if (event?.version !== 1 || event.cwd !== currentCwd) return;
     latestVerification = event;
-    if (event.state === "passed") needsVerification = false;
+    if (event.state === "passed") {
+      needsVerification = false;
+      const remaining = work?.mode === "executing"
+        ? work.todos.filter((todo) => todo.status !== "done")
+        : [];
+      if (work && remaining.length === 1 && isVerificationOnlyTodo(remaining[0].text)) {
+        updateTodo(work, remaining[0].id, "done");
+        work.updatedAt = new Date().toISOString();
+        void saveWork();
+      }
+    }
     if (work && event.state === "failed") {
       work.latestFailure = `Verification failed (${event.results?.find((item: any) => item.code !== 0)?.command ?? "unknown check"}).`;
       work.nextAction = "Inspect bounded verification failure; use Scout then Advisor if root cause or approach remains unclear.";
@@ -530,6 +556,7 @@ export default function continuityExtension(pi: ExtensionAPI) {
     disposeInstanceClaim();
     disposeVerify();
     disposeHeartbeat();
+    disposeWorktreeChange();
     pi.events.emit("pylon:tool-policy", {
       version: 1,
       kind: "unregister",
@@ -595,18 +622,15 @@ export default function continuityExtension(pi: ExtensionAPI) {
         block: true,
         reason: "Write the final user-facing response first, then retry completion as the last tool call in the same assistant message.",
       };
-    if (event.toolName === "bash") {
-      pendingBash.set(
-        event.toolCallId,
-        await worktreeFingerprint(ctx.cwd),
-      );
+    if (event.toolName === "bash" && !sharedWorktreeObserver) {
+      pendingBash.set(event.toolCallId, await worktreeFingerprint(ctx.cwd));
     } else if (["write", "edit", "heartbeat_start"].includes(event.toolName)) {
       latestVerification = undefined;
       needsVerification = true;
     }
   });
   pi.on("tool_result", async (event, ctx) => {
-    if (event.toolName !== "bash") return;
+    if (event.toolName !== "bash" || sharedWorktreeObserver) return;
     const before = pendingBash.get(event.toolCallId);
     pendingBash.delete(event.toolCallId);
     const after = await worktreeFingerprint(ctx.cwd);
@@ -783,7 +807,7 @@ export default function continuityExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use continuity_update set_plan selectively for explicit /plan, risky or long multi-phase work, handoffs/background jobs, or likely blockers. Straightforward read-only work and one-shot local fixes may skip it. Prefer 2–4 outcome-level todos. Batch set_plan with first independent reads when safe. During explicit planning, Continuity owns plan presentation; set goal, constraints, todos, and put compact actionable anchors in planSummary. Outside explicit planning it creates an internal execution task list only.",
       "Ask clarification only for a blocking user decision: one concrete decision in plain language, recommended option first, as sole tool call at a safe checkpoint. Never re-ask an answered question without new evidence. Use exact todo IDs. todoIds bulk-completes independent todos; nextTodoId atomically starts one pending todo. Nonterminal todo updates may be alongside the next independent useful tool when ordering is safe.",
-      "Verification is a gate, not a separate todo by default: keep verification out of new todo lists and bulk-complete finished implementation todos before final Verify. For an existing final todo that includes verification, run Verify first, then mark that todo done in a tool-only turn. Keep every nonterminal continuity update tool-only and before final text; never narrate progress before calling it. Skip Verify for read-only work. After every todo is done and verification passes, write exactly one evidence-aware text-only final response; Continuity completes automatically. If Verify fails, is cancelled, stale, or errors, write one caveated text-only final response, end the assistant run with no subsequent tool call, and leave Continuity executing. Use completion only when explicitly allowing a clean or no-check Verify result, or for compatibility; failed verification never qualifies.",
+      "Verification is a gate, not a separate todo by default: keep verification out of new todo lists and bulk-complete finished implementation todos before final Verify. A sole remaining verification-only todo is marked done automatically when Verify passes. Keep every nonterminal continuity update tool-only and before final text; never narrate progress before calling it. Skip Verify for read-only work. After every todo is done and verification passes, write exactly one evidence-aware text-only final response; Continuity completes automatically. If Verify fails, is cancelled, stale, or errors, write one caveated text-only final response, end the assistant run with no subsequent tool call, and leave Continuity executing. Use completion only when explicitly allowing a clean or no-check Verify result, or for compatibility; failed verification never qualifies.",
     ],
     renderShell: "self",
     renderCall: () => new Container(),

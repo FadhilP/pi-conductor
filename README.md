@@ -34,7 +34,7 @@ Select models for the child-agent tools after reloading. Replace the examples wi
 /scout
 ```
 
-Advisor, Grunt, and Scout stay inactive until configured. In TUI mode, `/advisor`, `/grunt`, and `/scout` open model selectors. Each command's `reset` option enables that tool with the current main model; `disable` turns it off. Use `status` to inspect its configuration.
+Advisor, Grunt, and Scout stay unavailable until configured. In TUI mode, `/advisor`, `/grunt`, and `/scout` open model selectors. Each command's `reset` option configures that tool with the current main model; `disable` turns it off. With Pylon, configured specialist tools remain deferred until `search_tools` activates the relevant capability. Use `status` to inspect configuration.
 
 Optional Continuity planner and executor profiles can use separate models:
 
@@ -54,13 +54,14 @@ Run `/pylon doctor` to check model availability, credentials, dependencies, tool
 ## Bundled Packages
 
 - **[pi-advisor](./packages/pi-advisor)** — Consults a selected tool-free model for difficult planning, architecture review, and failure recovery using bounded, redacted context.
-- **[pylon-core](./packages/pylon-core)** — Coordinates tool policies from Advisor, Scout, and Continuity, and reports per-tool estimated session payload tokens.
+- **[pylon-core](./packages/pylon-core)** — Coordinates package tool policies, deduplicates shell worktree observation, and reports per-tool estimated session payload tokens.
 - **[pi-continuity](./packages/pi-continuity)** — Adds explicit plan mode, structured clarifications, visible task lists, and opt-in durable workspace memory.
 - **[pi-focus](./packages/pi-focus)** — Provides a low-noise Pi terminal UI, compact or comfortable layouts, and the `focus-dark` theme.
 - **[pi-guard](./packages/pi-guard)** — Intercepts risky shell and file operations, requests confirmation for known destructive actions, and blocks unsafe writes.
 - **[pi-grunt](./packages/pi-grunt)** — Runs a synchronous delegated implementation worker for compact slices or complete non-difficult changes with main-selected thinking.
 - **[pi-heartbeat](./packages/pi-heartbeat)** — Runs bounded background shell jobs with tools for starting, checking, and cancelling jobs.
 - **[pi-helios](./packages/pi-helios)** — Provides consent-gated Playwright browser use plus named Windows-window screenshots.
+- **[pi-discover](./packages/pi-discover)** — Provides general-purpose read-only search and coordinated inactive-tool discovery.
 - **[pi-scout](./packages/pi-scout)** — Performs bounded repository reconnaissance, consent-gated isolated public-web research, and explicit Pi-session search.
 - **[pi-sieve](./packages/pi-sieve)** — Limits old bulky successful tool output in outbound context without modifying stored session messages.
 - **[pi-timeline](./packages/pi-timeline)** — Creates Git-backed filesystem checkpoints tied to prompts and supports listing, restoring, forking, or clearing them.
@@ -74,8 +75,10 @@ Packages coordinate through bounded, versioned event-bus metadata while remainin
 
 - Verify publishes lifecycle and results; Continuity gates completion, Timeline marks matching checkpoints, Advisor receives bounded recovery metadata, and Focus shows status.
 - Guard requests a Timeline checkpoint before destructive confirmation and remains final safety authority; Pylon reports its latest decision.
+- Pylon fingerprints the worktree once around each model turn containing shell calls; Continuity and Timeline consume the shared mutation result while retaining standalone fallbacks.
 - Heartbeat publishes job lifecycle with optional todo and purpose metadata; Continuity tracks explicitly linked jobs.
 - Grunt performs sequential implementation in an isolated temporary Git worktree by default, applying successful non-stale patches back to the parent. Direct mode edits the current working directory without rollback guarantees; dynamic mode selects isolation when Git `HEAD` exists and direct execution otherwise. Main retains architecture, review, and final verification; Advisor consultation remains optional and evidence-driven.
+- Advisor, Grunt, repository Scout, Continuity, and Memory stay active when configured so their workflow guidance remains visible. Discover keeps `rg`, `fd`, and `search_tools` active while Pylon defers optional browser and capture schemas until discovery selects them; restrictive gates remain authoritative.
 - Scout receives bounded verification and checkpoint archaeology from parent session metadata.
 - Continuity supports `/plan review`, recording the shared run's `reviewer` phase for Timeline grouping.
 

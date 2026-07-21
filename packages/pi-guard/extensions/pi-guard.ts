@@ -132,9 +132,10 @@ export default function guardExtension(pi: ExtensionAPI) {
     detail: string,
     operation: ApprovalIdentity["operation"],
     value: string,
+    signal?: AbortSignal,
   ): Promise<boolean> => {
     // Remembered consent is never usable without an interactive UI.
-    if (!ctx.hasUI) return false;
+    if (!ctx.hasUI || signal?.aborted) return false;
 
     let cwd: string;
     try {
@@ -173,6 +174,7 @@ export default function guardExtension(pi: ExtensionAPI) {
       selected = await ctx.ui.select(
         `Pi Guard confirmation\n\n${reason}.\n\n${detail.slice(0, 2000)}${remembered}`,
         choices,
+        signal ? { signal } : undefined,
       );
     } catch {
       return false;
@@ -198,8 +200,9 @@ export default function guardExtension(pi: ExtensionAPI) {
     detail: string,
     operation: ApprovalIdentity["operation"],
     value: string,
+    signal?: AbortSignal,
   ) => {
-    if (await approve(ctx, reason, detail, operation, value)) {
+    if (await approve(ctx, reason, detail, operation, value, signal)) {
       confirmed++;
       publish(ctx, "confirmed", reason);
       return true;

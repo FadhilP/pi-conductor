@@ -28,8 +28,8 @@ import {
   type SessionIntent,
 } from "../src/sessions.ts";
 
-const extensionDir = dirname(fileURLToPath(import.meta.url));
-const searchToolsExtension = join(extensionDir, "search-tools.ts");
+const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
+const scoutChildToolsExtension = join(packageDir, "src", "scout-child-tools.ts");
 const HEARTBEAT_MS = 1_000;
 const WEB_SCOUT_TIMEOUT_MS = 5 * 60 * 1000;
 const WEB_SCOUT_GRANT_ENV = "PI_HELIOS_WEB_SCOUT_GRANT";
@@ -144,6 +144,7 @@ export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
       owner: "pi-scout",
       managedTools: ["repo_scout", "web_scout"],
       enabledTools: enabled ? ["repo_scout", "web_scout"] : [],
+      ...(enabled ? { deferredTools: ["web_scout"] } : {}),
       acknowledge: () => { coordinated = true; },
     });
     if (coordinated) return;
@@ -360,7 +361,7 @@ export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
           (sessionDir = await repoSessionDir()),
           "--no-extensions",
           "-e",
-          searchToolsExtension,
+          scoutChildToolsExtension,
           "--no-skills",
           "--no-prompt-templates",
           "--no-context-files",

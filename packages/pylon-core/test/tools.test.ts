@@ -17,6 +17,17 @@ test("managed tools merge without lost updates", () => {
   assert.deepEqual(new Set(tools), new Set(["read", "edit", "advisor"]));
 });
 
+test("deferred tools stay hidden until selected", () => {
+  const policies = [{
+    owner: "pi-test",
+    managedTools: ["specialist"],
+    enabledTools: ["specialist"],
+    deferredTools: ["specialist"],
+  }];
+  assert.deepEqual(reconcileTools(["read"], policies), ["read"]);
+  assert.deepEqual(reconcileTools(["read"], policies, ["specialist"]), ["read", "specialist"]);
+});
+
 test("multiple gates intersect fail closed", () => {
   const tools = reconcileTools(
     ["read", "edit"],
@@ -36,4 +47,9 @@ test("protocol validates version, owners, and managed subsets", () => {
   assert.match((parseToolMessage({ version: 2, kind: "unregister", owner: "pi-scout" }) as any).error, /version/);
   assert.match((parseToolMessage({ version: 1, kind: "register", owner: "bad", managedTools: [], enabledTools: [] }) as any).error, /owner/);
   assert.match((parseToolMessage({ version: 1, kind: "register", owner: "pi-test", managedTools: [], enabledTools: ["read"] }) as any).error, /subset/);
+  assert.match((parseToolMessage({ version: 1, kind: "register", owner: "pi-test", managedTools: ["read"], enabledTools: [], deferredTools: ["read"] }) as any).error, /deferredTools.*subset/);
+  assert.deepEqual(
+    (parseToolMessage({ version: 1, kind: "register", owner: "pi-test", managedTools: ["read"], enabledTools: ["read"], deferredTools: ["read"] }) as any).message.deferredTools,
+    ["read"],
+  );
 });

@@ -8,7 +8,7 @@ Consent-gated browser use and named Windows-window screenshots for [Pi](https://
 pi install git:github.com/FadhilP/pylon
 ```
 
-Run `/reload` after installation. `@playwright/cli@0.1.17` is pinned as runtime dependency.
+Run `/reload` after installation. `@playwright/cli@0.1.17` is pinned as runtime dependency. In the Pylon bundle, browser and capture schemas stay deferred until `search_tools` activates them; standalone Helios keeps both tools active.
 
 ## Browser setup
 
