@@ -134,7 +134,8 @@ test("root bundle loads, starts, wires integrations, and shuts down", async () =
       undefined,
       ctx,
     );
-    assert.match(discoveryResult.content[0].text, /Activated: helios_browser/);
+    assert.match(discoveryResult.content[0].text, /Selected: helios_browser/);
+    assert.match(discoveryResult.content[0].text, /Callable definitions update next model turn/);
     assert.ok(active.includes("helios_browser"));
     await commands.get("pylon").handler("doctor", ctx);
     assert.match(notification, /Package health:/);

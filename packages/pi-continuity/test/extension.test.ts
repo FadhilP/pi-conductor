@@ -820,6 +820,7 @@ test("subsequent plan inherits timeline lineage from a fresh executor session", 
   const previousRun = {
     version: 1,
     runId: "first-plan",
+    timelineId: "first-plan",
     role: "executor",
     parentSessionId: "planner-session",
     createdAt: new Date().toISOString(),
@@ -1327,7 +1328,7 @@ test("memory candidates survive manual and turn-end compact into model context",
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   const root = await mkdtemp(join(tmpdir(), "continuity-extension-memory-"));
   const cwd = join(root, "repo"), agent = join(root, "agent"), notifications: string[] = [],
-    legacy = join(agent, "pi-continuity", "memory-v3");
+    memoryV4 = join(agent, "pi-continuity", "memory-v4");
   await mkdir(cwd);
   await exec("git", ["init", "-q", cwd]);
   await exec("git", ["-C", cwd, "config", "user.email", "test@example.invalid"]);
@@ -1335,8 +1336,8 @@ test("memory candidates survive manual and turn-end compact into model context",
   await writeFile(join(cwd, "README.md"), "project\n");
   await exec("git", ["-C", cwd, "add", "."]);
   await exec("git", ["-C", cwd, "commit", "-qm", "base"]);
-  await mkdir(legacy, { recursive: true });
-  await writeFile(join(legacy, "memory.json"), "legacy");
+  await mkdir(memoryV4, { recursive: true });
+  await writeFile(join(memoryV4, "memory.json"), "malformed");
   process.env.PI_CODING_AGENT_DIR = agent;
   const ctx: any = {
     cwd, hasUI: true, mode: "json",
@@ -1352,7 +1353,7 @@ test("memory candidates survive manual and turn-end compact into model context",
     for (const handler of first.handlers.get("session_start") ?? [])
       await handler({ reason: "startup" }, ctx);
     await first.commands.get("memory").handler("backups", ctx);
-    assert.match(notifications.at(-1)!, /memory-v3\.reset-unsupported-/);
+    assert.match(notifications.at(-1)!, /memory\.json\.reset-unsupported-/);
     const result = await first.tools.get("memory").execute(
       "call", {
         action: "add",

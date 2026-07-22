@@ -12,10 +12,6 @@ test("checkpoint compatibility keeps refs informational", () => {
     headRef: "refs/heads/main",
   };
   assert.deepEqual(
-    classifyCompatibility({ ...current, headRef: undefined }, current),
-    { allowed: true, refState: "legacy" },
-  );
-  assert.deepEqual(
     classifyCompatibility({ ...current, headRef: null }, { ...current, headRef: null }),
     { allowed: true, refState: "same" },
   );
@@ -41,11 +37,12 @@ test("checkpoint compatibility keeps refs informational", () => {
   );
 });
 
-test("run metadata is optional and latest valid entry preserves timeline lineage", () => {
+test("latest valid run metadata preserves explicit timeline lineage", () => {
   assert.equal(findRunEntry([]), undefined);
   const planner = {
     version: 1 as const,
     runId: "run-1",
+    timelineId: "run-1",
     role: "planner" as const,
     createdAt: "2026-01-01T00:00:00.000Z",
   };
@@ -60,6 +57,7 @@ test("run metadata is optional and latest valid entry preserves timeline lineage
     timelineId: "run-1",
   };
   assert.equal(isRunEntry(planner), true);
+  assert.equal(isRunEntry({ ...planner, timelineId: undefined }), false);
   assert.equal(isRunEntry(nextPlan), true);
   assert.equal(isRunEntry({ ...nextPlan, timelineId: "" }), false);
   assert.equal(runTimelineId(planner), runTimelineId(nextPlan));

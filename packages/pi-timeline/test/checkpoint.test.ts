@@ -111,7 +111,7 @@ test("timeline rejects incompatible targets before rollback capture", async () =
         {
           type: "custom",
           customType: "pi-prompt-checkpoint",
-          id: "checkpoint-legacy",
+          id: "checkpoint-unsupported",
           data: {
             version: 3,
             kind: "pi-prompt-checkpoint",
@@ -119,11 +119,11 @@ test("timeline rejects incompatible targets before rollback capture", async () =
             ownerSessionId: "test-session",
             continuationEntryId: "user-1",
             createdAt: checkpointTime,
-            snapshotId: "legacy",
+            snapshotId: "unsupported-without-head-ref",
             gitRoot: root,
             head,
-            worktreeRef: "refs/pi-timeline/test/legacy/worktree",
-            indexRef: "refs/pi-timeline/test/legacy/index",
+            worktreeRef: "refs/pi-timeline/test/unsupported/worktree",
+            indexRef: "refs/pi-timeline/test/unsupported/index",
             worktreeTree: head,
             indexTree: head,
           },
@@ -163,8 +163,8 @@ test("timeline rejects incompatible targets before rollback capture", async () =
     };
     await handlers.get("session_start")![0]({}, ctx);
     await commands.get("timeline").handler("list", ctx);
-    assert.match(notices.at(-1)!, new RegExp(`\\[branch:unknown\\] ${displayedTime} Old prompt`));
-    assert.doesNotMatch(notices.at(-1)!, /test-session:checkpoint/);
+    assert.match(notices.at(-1)!, new RegExp(`\\[blocked:HEAD\\] ${displayedTime} Old prompt`));
+    assert.doesNotMatch(notices.at(-1)!, /branch:unknown|unsupported-without-head-ref|test-session:checkpoint/);
     await commands.get("timeline").handler("", ctx);
     assert.equal(selections.length, 1);
     assert.ok(selections[0]!.every((row) => row.includes(` ${displayedTime} Old prompt`)));
@@ -213,7 +213,7 @@ test("capture completes and restore preserves ignored files", { timeout: 20_000 
   }
 });
 
-test("capture records detached HEAD distinctly from legacy records", async () => {
+test("capture records detached HEAD", async () => {
   const { root, git } = await repository();
   try {
     await git("checkout", "--detach", "-q");

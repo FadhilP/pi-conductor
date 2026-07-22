@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, readdir, rename } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Container, Text } from "@earendil-works/pi-tui";
@@ -251,23 +251,6 @@ export default function continuityExtension(pi: ExtensionAPI) {
     }
     return resolved;
   };
-  // Experimental schemas deliberately start clean rather than silently migrating.
-  const resetLegacyWorkspaceMemory = async () => {
-    for (const legacyShared of [join(root, "memory-v2"), join(root, "memory-v3")]) await rename(legacyShared, `${legacyShared}.reset-unsupported-${randomUUID()}`).catch((error: any) => {
-      if (error?.code !== "ENOENT") throw error;
-    });
-    for (const name of ["memory.json", "candidates.json"]) {
-      const path = join(dir, name);
-      try {
-        const value = JSON.parse(await readFile(path, "utf8"));
-        if (value?.schemaVersion !== MEMORY_SCHEMA_VERSION)
-          await rename(path, `${path}.reset-unsupported-${randomUUID()}`);
-      } catch (error: any) {
-        if (error?.code !== "ENOENT")
-          await rename(path, `${path}.reset-unsupported-${randomUUID()}`).catch(() => {});
-      }
-    }
-  };
   const visibleFacts = async (query: string, active?: Work) => {
     project = await resolveProject(currentCwd);
     // Classify the complete bounded relevant pool before final three-slot selection.
@@ -494,7 +477,6 @@ export default function continuityExtension(pi: ExtensionAPI) {
     }
     ephemeralSession = !ctx.sessionManager.getSessionFile?.();
     const p = paths();
-    await resetLegacyWorkspaceMemory();
     work = await readJson<Work | undefined>(
       p.work,
       undefined,
@@ -1188,7 +1170,7 @@ export default function continuityExtension(pi: ExtensionAPI) {
           createdAt: now,
         };
         childWork.runId = run.runId;
-        childWork.timelineId = run.timelineId ?? run.runId;
+        childWork.timelineId = run.timelineId;
         const thinking = config.executor?.thinking ?? work.baseThinking;
         const result = await ctx.newSession({
           parentSession: sourceSessionFile,
@@ -1441,11 +1423,10 @@ export default function continuityExtension(pi: ExtensionAPI) {
         memoryInjectionEnabled = true;
         ctx.ui.notify("Memory injection enabled for this session.", "info");
       } else if (sub === "backups") {
-        const shared = (await readdir(root).catch(() => []))
-            .filter((name) => name.includes(".reset-unsupported-")).map((name) => join(root, name)),
-          local = (await readdir(dir).catch(() => []))
-            .filter((name) => name.includes(".reset-unsupported-")).map((name) => join(dir, name));
-        ctx.ui.notify([...shared, ...local].join("\n") || "No memory reset backups.", "info");
+        const backups = (await readdir(memoryDirectory()).catch(() => []))
+          .filter((name) => name.includes(".reset-unsupported-"))
+          .map((name) => join(memoryDirectory(), name));
+        ctx.ui.notify(backups.join("\n") || "No memory reset backups.", "info");
       } else if (sub === "compact") {
         project = await resolveProject(ctx.cwd);
         await compactMemory();

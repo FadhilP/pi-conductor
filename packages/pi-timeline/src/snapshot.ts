@@ -8,7 +8,7 @@ export type Snapshot = {
   snapshotId: string;
   gitRoot: string;
   head: string;
-  headRef?: string | null;
+  headRef: string | null;
   worktreeRef: string;
   indexRef: string;
   worktreeTree: string;

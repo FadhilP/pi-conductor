@@ -11,9 +11,8 @@ export const configPath = (agentDir = getAgentDir()) =>
 export async function loadConfig(path = configPath()): Promise<AdvisorConfig> {
   try {
     const value = JSON.parse(await readFile(path, "utf8"));
-    const legacy = value?.version === undefined && value?.schemaVersion === 1;
     if (
-      (value?.version !== 1 && !legacy) ||
+      value?.version !== 1 ||
       (value.advisorModel !== undefined &&
         (typeof value.advisorModel !== "string" || !value.advisorModel.trim())) ||
       (value.thinking !== undefined && !thinkingLevels.includes(value.thinking)) ||
@@ -26,7 +25,6 @@ export async function loadConfig(path = configPath()): Promise<AdvisorConfig> {
       ...(value.thinking ? { thinking: value.thinking } : {}),
       ...(value.useMainModel ? { useMainModel: true } : {}),
     };
-    if (legacy) await saveConfig(config, path).catch(() => {});
     return config;
   } catch (error: any) {
     if (error?.code === "ENOENT") return { version: 1 };

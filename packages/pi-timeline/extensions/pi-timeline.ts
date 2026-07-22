@@ -81,7 +81,6 @@ const compatibilityLabel = (
     return result.reason === "repository-mismatch"
       ? "[blocked:repository]"
       : "[blocked:HEAD]";
-  if (result.refState === "legacy") return "[branch:unknown]";
   if (result.refState === "target-detached") return "[checkpoint:detached]";
   if (result.refState === "current-detached") return "[current:detached]";
   if (result.refState === "ref-mismatch")
@@ -102,8 +101,6 @@ const compatibilityDetail = (
     return result.reason === "repository-mismatch"
       ? "Checkpoint belongs to a different repository."
       : "Checkpoint HEAD commit differs from current HEAD.";
-  if (result.refState === "legacy")
-    return "Branch information was not recorded for this checkpoint. HEAD commit matches.";
   if (result.refState === "same")
     return target.headRef === null
       ? "Checkpoint and current state use detached HEAD at the same commit."
@@ -268,6 +265,7 @@ export default function timelineExtension(
         entry.customType === "pi-prompt-checkpoint" &&
         entry.data?.version === 3
       ) {
+        if (entry.data.headRef !== null && typeof entry.data.headRef !== "string") continue;
         if (timelineId && checkpointTimelineId !== timelineId) continue;
         const user = byId.get(entry.data.promptEntryId) as any;
         if (user?.type === "message" && user.message.role === "user")

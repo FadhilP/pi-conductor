@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 export type GitState = {
   gitRoot: string;
   head: string;
-  headRef?: string | null;
+  headRef: string | null;
 };
 
 export type Compatibility =
@@ -11,7 +11,6 @@ export type Compatibility =
   | {
       allowed: true;
       refState:
-        | "legacy"
         | "same"
         | "target-detached"
         | "current-detached"
@@ -29,8 +28,6 @@ export function classifyCompatibility(
     return { allowed: false, reason: "repository-mismatch" };
   if (target.head !== current.head)
     return { allowed: false, reason: "head-mismatch" };
-  if (target.headRef === undefined)
-    return { allowed: true, refState: "legacy" };
   if (target.headRef === current.headRef)
     return { allowed: true, refState: "same" };
   if (target.headRef === null)

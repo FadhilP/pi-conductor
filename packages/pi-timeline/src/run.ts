@@ -3,7 +3,7 @@ export type RunRole = "planner" | "executor" | "reviewer";
 export type RunEntry = {
   version: 1;
   runId: string;
-  timelineId?: string;
+  timelineId: string;
   role: RunRole;
   parentSessionId?: string;
   createdAt: string;
@@ -14,8 +14,8 @@ export function isRunEntry(value: any): value is RunEntry {
     value?.version === 1 &&
       typeof value.runId === "string" &&
       value.runId.length > 0 &&
-      (value.timelineId === undefined ||
-        (typeof value.timelineId === "string" && value.timelineId.length > 0)) &&
+      typeof value.timelineId === "string" &&
+      value.timelineId.length > 0 &&
       ["planner", "executor", "reviewer"].includes(value.role) &&
       (value.parentSessionId === undefined ||
         typeof value.parentSessionId === "string") &&
@@ -23,7 +23,7 @@ export function isRunEntry(value: any): value is RunEntry {
   );
 }
 
-export const runTimelineId = (run: RunEntry) => run.timelineId ?? run.runId;
+export const runTimelineId = (run: RunEntry) => run.timelineId;
 
 export function hasTimeline(entries: readonly any[], timelineId: string): boolean {
   return entries.some(
