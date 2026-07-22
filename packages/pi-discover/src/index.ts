@@ -34,7 +34,7 @@ type IndexedRepository = RepositoryIdentity & { prefix: string };
 
 const languages: Record<string, string> = {
   ".c": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".h": "c", ".hpp": "cpp",
-  ".cs": "csharp", ".go": "go", ".java": "java", ".js": "javascript", ".jsx": "javascript",
+  ".cs": "csharp", ".dart": "dart", ".go": "go", ".java": "java", ".js": "javascript", ".jsx": "javascript",
   ".kt": "kotlin", ".kts": "kotlin", ".php": "php", ".py": "python", ".rb": "ruby",
   ".rs": "rust", ".sh": "shell", ".swift": "swift", ".ts": "typescript", ".tsx": "typescript",
   ".vue": "vue", ".svelte": "svelte",
@@ -94,6 +94,16 @@ export function extractSymbols(content: string, language: string): SymbolRow[] {
     }
     if (language === "shell") {
       match = /^\s*(?:function\s+)?([A-Za-z_]\w*)\s*(?:\(\s*\))?\s*\{/.exec(source);
+      if (match) add(match[1], "function", index + 1, source.indexOf(match[1]) + 1, source);
+      continue;
+    }
+    if (language === "dart") {
+      match = /^\s*(?:(?:abstract|base|final|interface|sealed|mixin)\s+)*(class|enum|mixin|extension(?:\s+type)?|typedef)\s+([A-Za-z_$][\w$]*)/.exec(source);
+      if (match) {
+        add(match[2], match[1].replace(/\s+/g, " "), index + 1, source.indexOf(match[2]) + 1, source);
+        continue;
+      }
+      match = /^\s*(?:(?:external|static|abstract|covariant)\s+)*(?:[A-Za-z_$][\w$]*(?:<[^;{}()=]+>)?\??\s+)?([A-Za-z_$][\w$]*)\s*(?:<[^;{}()=]+>)?\s*\([^;{}]*\)\s*(?:async\*?|sync\*?)?\s*(?:=>|\{|;)/.exec(source);
       if (match) add(match[1], "function", index + 1, source.indexOf(match[1]) + 1, source);
       continue;
     }

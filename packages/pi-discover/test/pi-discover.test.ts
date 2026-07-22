@@ -165,6 +165,11 @@ test("symbol extraction covers common language declarations", () => {
   assert.deepEqual(extractSymbols("class Worker:\n    async def execute(self):", "python").map(({ name, kind }) => ({ name, kind })), [
     { name: "Worker", kind: "class" }, { name: "execute", kind: "function" },
   ]);
+  assert.deepEqual(extractSymbols("sealed class Worker {}\nenum State { ready }\nmixin Logging {}\nextension Labels on String {}\nextension type UserId(int value) {}\ntypedef Callback = void Function();\nFuture<void> execute() async {}\nString label() => 'ready';", "dart").map(({ name, kind }) => ({ name, kind })), [
+    { name: "Worker", kind: "class" }, { name: "State", kind: "enum" }, { name: "Logging", kind: "mixin" },
+    { name: "Labels", kind: "extension" }, { name: "UserId", kind: "extension type" }, { name: "Callback", kind: "typedef" },
+    { name: "execute", kind: "function" }, { name: "label", kind: "function" },
+  ]);
 });
 
 test("SQLite index refreshes changed, restored, and deleted files atomically", async () => {
