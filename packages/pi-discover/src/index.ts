@@ -654,7 +654,8 @@ export function registerIndexTools(pi: ExtensionAPI, indexFor: IndexProvider, ma
     }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, ctx) {
       const results = await indexFor(ctx.cwd).searchSymbols(ctx.cwd, params);
-      return { content: [{ type: "text" as const, text: bounded(JSON.stringify({ heuristic: true, results }), maxBytes) }], details: { count: results.length, heuristic: true } };
+      const displayed = results.map(({ name, kind, path, line }) => ({ name, kind, path, line }));
+      return { content: [{ type: "text" as const, text: bounded(JSON.stringify({ heuristic: true, results: displayed }), maxBytes) }], details: { count: results.length, heuristic: true } };
     },
   });
   pi.registerTool({
@@ -669,7 +670,8 @@ export function registerIndexTools(pi: ExtensionAPI, indexFor: IndexProvider, ma
     }, { additionalProperties: false }),
     async execute(_id, params, _signal, _update, ctx) {
       const results = await indexFor(ctx.cwd).searchCode(ctx.cwd, params);
-      return { content: [{ type: "text" as const, text: bounded(JSON.stringify({ semantic: false, results }), maxBytes) }], details: { count: results.length, semantic: false } };
+      const displayed = results.map(({ path, language, line, text }) => ({ path, language, line, text }));
+      return { content: [{ type: "text" as const, text: bounded(JSON.stringify({ semantic: false, results: displayed }), maxBytes) }], details: { count: results.length, semantic: false } };
     },
   });
   pi.registerTool({

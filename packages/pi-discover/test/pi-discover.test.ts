@@ -10,7 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 const execFileAsync = promisify(execFile);
 import discover, { keywordRankTools, normalizedQuery, rankInactiveTools, relationshipRoles } from "../extensions/pi-discover.ts";
 import registerDiscoverChildTools, { DISCOVER_CHILD_MAX_BYTES } from "../src/discover-child-tools.ts";
-import { extractSymbols, indexDatabasePath, WorkspaceIndex } from "../src/index.ts";
+import { extractSymbols, indexDatabasePath, registerIndexTools, WorkspaceIndex } from "../src/index.ts";
 
 class Bus {
   handlers = new Map<string, ((...values: any[]) => any)[]>();
@@ -66,6 +66,25 @@ test("host and child entrypoints register their intended discovery tools", () =>
   const childTools = new Map<string, any>();
   registerDiscoverChildTools({ registerTool: (tool: any) => childTools.set(tool.name, tool) } as any);
   assert.deepEqual([...childTools.keys()], ["rg", "fd", "relationship_graph", "symbol_search", "code_search", "index_status"]);
+});
+
+test("indexed searches display only model-useful fields", async () => {
+  const tools = new Map<string, any>();
+  registerIndexTools({ registerTool: (tool: any) => tools.set(tool.name, tool) } as any, () => ({
+    searchSymbols: async () => [{ name: "redact", kind: "function", path: "src/redact.ts", language: "typescript", line: 8, column: 17, signature: "export function redact()" }],
+    searchCode: async () => [{ path: "src/redact.ts", language: "typescript", rank: -3.4, line: 8, text: "export function redact()" }],
+  } as any));
+  const context = { cwd: process.cwd() };
+  const symbolResult = await tools.get("symbol_search").execute("symbol", { query: "redact" }, undefined, undefined, context);
+  assert.deepEqual(JSON.parse(symbolResult.content[0].text), {
+    heuristic: true,
+    results: [{ name: "redact", kind: "function", path: "src/redact.ts", line: 8 }],
+  });
+  const codeResult = await tools.get("code_search").execute("code", { query: "redact" }, undefined, undefined, context);
+  assert.deepEqual(JSON.parse(codeResult.content[0].text), {
+    semantic: false,
+    results: [{ path: "src/redact.ts", language: "typescript", line: 8, text: "export function redact()" }],
+  });
 });
 
 test("discover child tools enforce their child-local output cap", async () => {
