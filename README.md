@@ -62,7 +62,7 @@ Run `/pylon doctor` to check model availability, credentials, dependencies, tool
 - **[pi-heartbeat](./packages/pi-heartbeat)** — Runs bounded background shell jobs with tools for starting, checking, and cancelling jobs.
 - **[pi-helios](./packages/pi-helios)** — Provides consent-gated Playwright browser use plus named Windows-window screenshots.
 - **[pi-discover](./packages/pi-discover)** — Provides general-purpose read-only search and coordinated inactive-tool discovery.
-- **[pi-scout](./packages/pi-scout)** — Performs bounded repository reconnaissance, consent-gated isolated public-web research, and explicit Pi-session search.
+- **[pi-scout](./packages/pi-scout)** — Performs bounded repository reconnaissance, fresh-browser isolated public-web research, and explicit Pi-session search.
 - **[pi-sieve](./packages/pi-sieve)** — Limits old bulky successful tool output in outbound context without modifying stored session messages.
 - **[pi-timeline](./packages/pi-timeline)** — Creates Git-backed filesystem checkpoints tied to prompts and supports listing, restoring, forking, or clearing them.
 - **[pi-verify](./packages/pi-verify)** — Detects and runs existing project checks with bounded time and output.

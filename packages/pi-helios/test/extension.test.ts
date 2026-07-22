@@ -160,7 +160,7 @@ test("Web Scout reuses navigation snapshots without extra snapshot subprocesses"
       commands.push(action);
       if (action === "tab-list") return { code: 0, stdout: JSON.stringify({ result: "- 0: (current) [Example](https://1.1.1.1/)" }), stderr: "", killed: false };
       if (action === "eval") return { code: 0, stdout: JSON.stringify({ result: "https://1.1.1.1/next" }), stderr: "", killed: false };
-      if (action === "goto") return { code: 0, stdout: JSON.stringify({ snapshot: "- link Next [ref=e1]" }), stderr: "", killed: false };
+      if (action === "goto") return { code: 0, stdout: JSON.stringify({ snapshot: Array.from({ length: 105 }, (_, index) => `- link Item ${index} [ref=e${index + 1}]`).join("\n") }), stderr: "", killed: false };
       return { code: 0, stdout: "{}", stderr: "", killed: false };
     },
     registerTool(value: any) { tools.set(value.name, value); },
@@ -170,8 +170,12 @@ test("Web Scout reuses navigation snapshots without extra snapshot subprocesses"
   const navigated = await browser.execute("navigate", { action: "navigate", url: "https://1.1.1.1" });
   assert.match(navigated.content[0].text, /ref=e1/);
   assert.deepEqual(commands, ["open", "tab-list", "goto", "tab-list"]);
-  await browser.execute("follow", { action: "follow", target: "e1" });
+  const followed = await browser.execute("follow", { action: "follow", target: "e1" });
   assert.deepEqual(commands.slice(4), ["eval", "goto", "tab-list"]);
+  const beforeContinue = commands.length;
+  const continued = await browser.execute("continue", { action: "continue", cursor: followed.details.continuation });
+  assert.equal(commands.length, beforeContinue);
+  assert.match(continued.content[0].text, /ref=e105/);
   assert.equal(commands.includes("snapshot"), false);
   for (const handler of handlers.get("session_shutdown") ?? []) await handler();
 });
@@ -231,7 +235,7 @@ test("browser find returns targeted refs usable by later actions", async () => {
     const command = args.find((value) => ["open", "find", "click", "tab-list", "close"].includes(value)) ?? "unknown";
     commands.push(command);
     if (command === "tab-list") return { code: 0, stdout: JSON.stringify({ result: "- 0: (current) [Shop](https://example.com/)" }), stderr: "", killed: false };
-    if (command === "find") return { code: 0, stdout: JSON.stringify({ result: 'Found 1 match for "Add to cart":\n\n- button "Add to cart" [ref=e9]' }), stderr: "", killed: false };
+    if (command === "find") return { code: 0, stdout: JSON.stringify({ result: 'Found 21 matches for "Add to cart":\n\n- button "Add to cart" [ref=e9]' }), stderr: "", killed: false };
     if (command === "click") return { code: 0, stdout: JSON.stringify({ snapshot: '- button "Added" [ref=e10]' }), stderr: "", killed: false };
     return { code: 0, stdout: "{}", stderr: "", killed: false };
   } });
@@ -239,12 +243,41 @@ test("browser find returns targeted refs usable by later actions", async () => {
   const ctx = context();
   await browser.execute("start", { action: "start", url: "https://example.com" }, undefined, undefined, ctx);
   const found = await browser.execute("find", { action: "find", text: "Add to cart" }, undefined, undefined, ctx);
-  assert.match(found.content[0].text, /Found 1 match/);
+  assert.match(found.content[0].text, /Found 21 matches/);
   assert.match(found.content[0].text, /ref=e9/);
-  await browser.execute("click", { action: "click", target: "e9" }, undefined, undefined, ctx);
+  assert.match(found.content[0].text, /Refine find query/);
+  assert.doesNotMatch(found.content[0].text, /Ownership:|Duration:/);
+  assert.equal(found.details.findMatches, 21);
+  const clicked = await browser.execute("click", { action: "click", target: "e9" }, undefined, undefined, ctx);
+  assert.match(clicked.content[0].text, /Page: Shop/);
   await assert.rejects(browser.execute("invalid", { action: "find", text: "cart", regex: "cart" }, undefined, undefined, ctx), /exactly one/);
   assert.ok(commands.includes("find"));
   assert.ok(commands.includes("click"));
+  for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
+});
+
+test("browser continue pages cached output without another CLI command and replaces refs", async () => {
+  const raw = Array.from({ length: 205 }, (_, index) => `- button Item ${index} [ref=e${index}]`).join("\n");
+  const commands: string[] = [];
+  const { tools, handlers } = runtime({ exec: async (_command: string, args: string[]) => {
+    const command = args.find((value) => ["open", "snapshot", "click", "tab-list", "close"].includes(value)) ?? "unknown";
+    commands.push(command);
+    if (command === "tab-list") return { code: 0, stdout: JSON.stringify({ result: "- 0: (current) [Example](https://example.com/)" }), stderr: "", killed: false };
+    if (command === "snapshot") return { code: 0, stdout: JSON.stringify({ snapshot: raw }), stderr: "", killed: false };
+    return { code: 0, stdout: "{}", stderr: "", killed: false };
+  } });
+  const browser = tools.get("helios_browser");
+  const ctx = context();
+  await browser.execute("start", { action: "start" }, undefined, undefined, ctx);
+  const first = await browser.execute("snapshot", { action: "snapshot" }, undefined, undefined, ctx);
+  assert.match(first.content[0].text, /Continuation: hc_/);
+  const before = commands.length;
+  const continued = await browser.execute("continue", { action: "continue", cursor: first.details.snapshotContinuation }, undefined, undefined, ctx);
+  assert.equal(commands.length, before);
+  assert.match(continued.content[0].text, /ref=e204/);
+  await assert.rejects(browser.execute("stale-ref", { action: "click", target: "e1" }, undefined, undefined, ctx), /stale/);
+  await browser.execute("latest-ref", { action: "click", target: "e204" }, undefined, undefined, ctx);
+  assert.equal(commands.filter((command) => command === "snapshot").length, 1);
   for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);
 });
 

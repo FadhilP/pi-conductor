@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -8,10 +9,19 @@ import { validatePngFile, type Exec } from "./capture.ts";
 const CLI_PATH = fileURLToPath(import.meta.resolve("@playwright/cli/playwright-cli.js"));
 const MAX_STDOUT_BYTES = 256 * 1024;
 const MAX_STDERR_BYTES = 16 * 1024;
-const MAX_SNAPSHOT_LINES = 500;
-const MAX_SNAPSHOT_BYTES = 50 * 1024;
+const MAX_SNAPSHOT_LINES = 200;
+const MAX_SNAPSHOT_BYTES = 20 * 1024;
+const MAX_FIND_LINES = 120;
+const MAX_FIND_BYTES = 12 * 1024;
+const MAX_ACTION_SNAPSHOT_LINES = 100;
+const MAX_ACTION_SNAPSHOT_BYTES = 10 * 1024;
 const SESSION_NAME = /^helios-[a-f0-9]{12}-[a-f0-9]{12}$/;
 const ELEMENT_REF = /^e\d+$/;
+const CONTINUATION_CURSOR = /^hc_[a-f0-9]{32}$/;
+const INVALIDATES_CONTINUATION = new Set([
+  "open", "attach-cdp", "attach-extension", "navigate", "click", "fill", "press", "hover", "select", "check", "uncheck",
+  "back", "forward", "reload", "tab-new", "tab-select", "tab-close", "close", "detach",
+]);
 
 export type BrowserOwnership = "owned" | "cdp-attached" | "extension-attached";
 export type BrowserAction =
@@ -21,6 +31,7 @@ export type BrowserAction =
   | { kind: "navigate"; url: string }
   | { kind: "link-url"; target: string }
   | { kind: "snapshot"; target?: string; depth?: number }
+  | { kind: "continue"; cursor: string }
   | { kind: "find"; text?: string; regex?: string }
   | { kind: "screenshot"; target?: string; fullPage?: boolean }
   | { kind: "click" | "hover" | "check" | "uncheck"; target: string }
@@ -38,6 +49,8 @@ export interface CliResult {
   snapshotTruncated?: boolean;
   snapshotOmittedLines?: number;
   snapshotOmittedBytes?: number;
+  findMatches?: number;
+  snapshotContinuation?: string;
   artifactPath?: string;
 }
 
@@ -86,18 +99,64 @@ const CREDENTIAL_PATTERNS: RegExp[] = [
 
 interface BoundedSnapshot {
   content: string;
-  redactions: number;
   truncated: boolean;
   omittedLines: number;
   omittedBytes: number;
+  nextIndex?: number;
+}
+
+interface RedactedSnapshot {
+  lines: string[];
+  redactions: number;
+}
+
+interface PendingContinuation {
+  token: string;
+  lines: string[];
+  nextIndex: number;
+  limits: { lines: number; bytes: number };
 }
 
 export interface PlaywrightCliOptions {
   maxSnapshotLines?: number;
   maxSnapshotBytes?: number;
+  maxActionSnapshotLines?: number;
+  maxActionSnapshotBytes?: number;
 }
 
-function boundedSnapshot(value: string, options: PlaywrightCliOptions): BoundedSnapshot {
+function validateOptions(options: PlaywrightCliOptions): void {
+  for (const [name, value] of Object.entries(options)) {
+    if (value === undefined) continue;
+    if (!Number.isInteger(value)) throw new Error(`${name} must be an integer`);
+    const minimum = name.endsWith("Lines") ? 1 : 4;
+    if (value < minimum) throw new Error(`${name} must be at least ${minimum}`);
+  }
+}
+
+function snapshotLimits(action: BrowserAction, options: PlaywrightCliOptions): { lines: number; bytes: number } {
+  if (action.kind === "find") return {
+    lines: options.maxSnapshotLines ?? MAX_FIND_LINES,
+    bytes: options.maxSnapshotBytes ?? MAX_FIND_BYTES,
+  };
+  if (action.kind === "snapshot") return {
+    lines: options.maxSnapshotLines ?? MAX_SNAPSHOT_LINES,
+    bytes: options.maxSnapshotBytes ?? MAX_SNAPSHOT_BYTES,
+  };
+  return {
+    lines: options.maxActionSnapshotLines ?? options.maxSnapshotLines ?? MAX_ACTION_SNAPSHOT_LINES,
+    bytes: options.maxActionSnapshotBytes ?? options.maxSnapshotBytes ?? MAX_ACTION_SNAPSHOT_BYTES,
+  };
+}
+
+function findMatchCount(value: string): number | undefined {
+  const firstLine = value.split(/\r?\n/, 1)[0];
+  const match = firstLine.match(/^Found (\d+) match(?:es)?\b/);
+  if (!match) return undefined;
+  const count = Number(match[1]);
+  return Number.isSafeInteger(count) ? count : undefined;
+}
+
+function redactSnapshot(value: string): RedactedSnapshot {
   let redactions = 0;
   let redacted = value.replace(/(\b(?:textbox|searchbox|combobox|spinbutton)\b.*\[ref=e\d+\])\s*:.+$/gim, (_match, field: string) => {
     redactions++;
@@ -109,25 +168,51 @@ function boundedSnapshot(value: string, options: PlaywrightCliOptions): BoundedS
       return "[possible credential redacted]";
     });
   }
-  const lines = redacted.split(/\r?\n/);
+  return { lines: redacted.split(/\r?\n/), redactions };
+}
+
+function splitOversizedLines(lines: string[], maxBytes: number): string[] {
+  const output: string[] = [];
+  for (const line of lines) {
+    if (Buffer.byteLength(line) <= maxBytes) {
+      output.push(line);
+      continue;
+    }
+    let chunk = "";
+    let bytes = 0;
+    for (const character of line) {
+      const size = Buffer.byteLength(character);
+      if (chunk && bytes + size > maxBytes) {
+        output.push(chunk);
+        chunk = "";
+        bytes = 0;
+      }
+      chunk += character;
+      bytes += size;
+    }
+    if (chunk) output.push(chunk);
+  }
+  return output;
+}
+
+function boundedSnapshot(lines: string[], start: number, limits: { lines: number; bytes: number }): BoundedSnapshot {
   let bytes = 0;
-  let index = 0;
+  let index = start;
   const kept: string[] = [];
   for (; index < lines.length; index++) {
     const line = lines[index];
     const size = Buffer.byteLength(line) + (kept.length ? 1 : 0);
-    if (kept.length >= (options.maxSnapshotLines ?? MAX_SNAPSHOT_LINES) || bytes + size > (options.maxSnapshotBytes ?? MAX_SNAPSHOT_BYTES)) break;
+    if (kept.length >= limits.lines || bytes + size > limits.bytes) break;
     kept.push(line);
     bytes += size;
   }
   const truncated = index < lines.length;
-  if (truncated) kept.push("[Snapshot truncated by Helios]");
   return {
     content: kept.join("\n"),
-    redactions,
     truncated,
     omittedLines: lines.length - index,
     omittedBytes: truncated ? Buffer.byteLength(lines.slice(index).join("\n")) : 0,
+    nextIndex: truncated ? index : undefined,
   };
 }
 
@@ -154,6 +239,7 @@ export class PlaywrightCli {
   readonly directory: string;
   private readonly configPath: string;
   private readonly options: PlaywrightCliOptions;
+  private readonly continuations = new Map<string, PendingContinuation>();
   private configReady?: Promise<void>;
 
   private constructor(exec: Exec, directory: string, configPath: string, options: PlaywrightCliOptions) {
@@ -164,6 +250,7 @@ export class PlaywrightCli {
   }
 
   static async create(exec: Exec, options: PlaywrightCliOptions = {}): Promise<PlaywrightCli> {
+    validateOptions(options);
     await access(CLI_PATH).catch(() => { throw new HeliosCliError("unavailable", "Pinned @playwright/cli executable is unavailable; reinstall pi-helios"); });
     const directory = await mkdtemp(join(tmpdir(), "pi-helios-browser-"));
     await chmod(directory, 0o700).catch(() => {});
@@ -173,6 +260,7 @@ export class PlaywrightCli {
   }
 
   async dispose(): Promise<void> {
+    this.continuations.clear();
     await rm(this.directory, { recursive: true, force: true });
   }
 
@@ -199,6 +287,8 @@ export class PlaywrightCli {
   async run(sessionName: string, action: BrowserAction, signal?: AbortSignal): Promise<CliResult> {
     if (!SESSION_NAME.test(sessionName)) throw new Error("Unsafe Playwright CLI session name");
     if (signal?.aborted) throw new HeliosCliError("cancelled", "Browser action cancelled");
+    if (action.kind === "continue") return this.continueSnapshot(sessionName, action.cursor);
+    if (INVALIDATES_CONTINUATION.has(action.kind) || action.kind === "snapshot" || action.kind === "find") this.continuations.delete(sessionName);
     await this.ensureConfig();
     const { command, args, artifactPath, timeout } = this.arguments(action);
     const invocation = [CLI_PATH, "--json", `-s=${sessionName}`, command, ...args];
@@ -221,6 +311,8 @@ export class PlaywrightCli {
           : undefined;
     delete value.snapshot;
     if (nested) delete nested.snapshot;
+    if (action.kind === "find" && typeof value.result === "string") delete value.result;
+    if (rawSnapshot !== undefined) this.continuations.delete(sessionName);
     if (artifactPath) {
       try { await validatePngFile(artifactPath); }
       catch (error) {
@@ -228,16 +320,45 @@ export class PlaywrightCli {
         throw error;
       }
     }
-    const snapshot = rawSnapshot === undefined ? undefined : boundedSnapshot(rawSnapshot, this.options);
+    const limits = snapshotLimits(action, this.options);
+    const redacted = rawSnapshot === undefined ? undefined : redactSnapshot(rawSnapshot);
+    const lines = redacted === undefined ? undefined : splitOversizedLines(redacted.lines, Math.max(4, limits.bytes));
+    const snapshot = lines === undefined ? undefined : boundedSnapshot(lines, 0, limits);
+    const snapshotContinuation = snapshot?.nextIndex === undefined ? undefined : this.storeContinuation(sessionName, lines!, snapshot.nextIndex, limits);
     return {
       value,
       snapshot: snapshot?.content,
-      snapshotRedactions: snapshot?.redactions,
+      snapshotRedactions: redacted?.redactions,
       snapshotTruncated: snapshot?.truncated,
       snapshotOmittedLines: snapshot?.omittedLines,
       snapshotOmittedBytes: snapshot?.omittedBytes,
+      findMatches: action.kind === "find" && rawSnapshot !== undefined ? findMatchCount(rawSnapshot) : undefined,
+      snapshotContinuation,
       artifactPath,
     };
+  }
+
+  private continueSnapshot(sessionName: string, cursor: string): CliResult {
+    if (!CONTINUATION_CURSOR.test(cursor)) throw new Error("Browser continuation is stale; request a new snapshot or find result");
+    const pending = this.continuations.get(sessionName);
+    if (!pending || pending.token !== cursor) throw new Error("Browser continuation is stale; request a new snapshot or find result");
+    this.continuations.delete(sessionName);
+    const snapshot = boundedSnapshot(pending.lines, pending.nextIndex, pending.limits);
+    const snapshotContinuation = snapshot.nextIndex === undefined ? undefined : this.storeContinuation(sessionName, pending.lines, snapshot.nextIndex, pending.limits);
+    return {
+      value: {},
+      snapshot: snapshot.content,
+      snapshotTruncated: snapshot.truncated,
+      snapshotOmittedLines: snapshot.omittedLines,
+      snapshotOmittedBytes: snapshot.omittedBytes,
+      snapshotContinuation,
+    };
+  }
+
+  private storeContinuation(sessionName: string, lines: string[], nextIndex: number, limits: { lines: number; bytes: number }): string {
+    const token = `hc_${randomBytes(16).toString("hex")}`;
+    this.continuations.set(sessionName, { token, lines, nextIndex, limits });
+    return token;
   }
 
   private ensureConfig(): Promise<void> {
@@ -262,6 +383,7 @@ export class PlaywrightCli {
         if (action.depth !== undefined && (!Number.isInteger(action.depth) || action.depth < 1 || action.depth > 20)) throw new Error("Snapshot depth must be an integer from 1 to 20");
         return { command: "snapshot", args: [...(action.target ? [target(action.target)] : []), ...(action.depth ? [`--depth=${action.depth}`] : [])], timeout: normal };
       }
+      case "continue": throw new Error("Browser continuation must not invoke Playwright CLI");
       case "find": {
         if (Boolean(action.text) === Boolean(action.regex)) throw new Error("Browser find requires exactly one of text or regex");
         const query = action.text ?? action.regex!;

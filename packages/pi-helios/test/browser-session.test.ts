@@ -200,6 +200,24 @@ test("action snapshots replace references without an explicit snapshot command",
   await manager.close("action-refs", "close");
 });
 
+test("continuation chunks replace usable references", async () => {
+  const cli = fakeCli([]);
+  cli.run = async (_session: string, action: any) => {
+    if (action.kind === "tab-list") return { value: { result: "- 0: (current) [Example](https://example.com/)" } };
+    if (action.kind === "snapshot") return { value: {}, snapshot: "- button First [ref=e1]", snapshotContinuation: "hc_0123456789abcdef0123456789abcdef" };
+    if (action.kind === "continue") return { value: {}, snapshot: "- button Second [ref=e2]" };
+    return { value: {} };
+  };
+  const manager = new BrowserSessionManager(exec as any, async () => cli);
+  await manager.start("continuation-refs");
+  const first = await manager.operate("continuation-refs", { kind: "snapshot" });
+  assert.ok(first.snapshotContinuation);
+  await manager.operate("continuation-refs", { kind: "continue", cursor: first.snapshotContinuation! });
+  await assert.rejects(manager.operate("continuation-refs", { kind: "click", target: "e1" }), /stale/);
+  await manager.operate("continuation-refs", { kind: "click", target: "e2" });
+  await manager.close("continuation-refs", "close");
+});
+
 test("shutdown reports partial cleanup failure and keeps uncertain session", async () => {
   const failingCli = fakeCli([]);
   failingCli.run = async (session: string, action: any) => {

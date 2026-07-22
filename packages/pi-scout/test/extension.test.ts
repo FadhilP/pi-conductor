@@ -222,7 +222,7 @@ test("Repo Scout forwards its reported-cost ceiling and exposes budget exhaustio
   } finally { runtime.restore(); }
 });
 
-test("Scout registers separate repo and web tools; Web Scout fails closed without UI", async () => {
+test("Scout registers separate repo and web tools", async () => {
   const runtime = await harness();
   try {
     assert.deepEqual([...runtime.tools.keys()].sort(), ["repo_scout", "web_scout"]);
@@ -252,55 +252,99 @@ test("Scout registers separate repo and web tools; Web Scout fails closed withou
     assert.match(repoGuidance, /never say only 'using the prior map'/i);
     assert.match(repoGuidance, /Fresh child sessions inherit no Scout report/i);
     assert.match(repoGuidance, /When needed, call it before mutation tools/i);
-    const result = await runtime.tools.get("web_scout").execute("id", { task: "current docs" }, undefined, undefined, context({ hasUI: false }));
-    assert.equal(result.details.failureCode, "confirmation_unavailable");
+    assert.match(runtime.tools.get("web_scout").description, /fresh temporary Helios browser/);
   } finally { runtime.restore(); }
 });
 
-test("Web Scout requires exactly one Helios capability and fresh consent before grant", async () => {
+test("Web Scout validates input and requires exactly one Helios capability before grant", async () => {
   const runtime = await harness();
   let grants = 0;
-  let confirmation = "";
   runtime.events.on("pi-helios:web-scout-capability", (request) => request.respond({
     version: 1, owner: "pi-helios", childExtensionPath: "C:/bundle/web-scout-browser.ts",
     async issueGrant() { grants++; return { value: "grant", async revoke() {} }; },
   }));
   try {
-    const declined = await runtime.tools.get("web_scout").execute("id", {
-      task: "compare current browser docs", startUrls: ["https://example.com/docs"], maxPages: 3,
-    }, undefined, undefined, context({ ui: {
-      async confirm(_title: string, message: string) { confirmation = message; return false; }, setStatus() {},
-    } }));
-    assert.equal(declined.details.declined, true);
+    const invalid = await runtime.tools.get("web_scout").execute("invalid", {
+      task: "docs", startUrls: ["file:///secret"],
+    }, undefined, undefined, context({ hasUI: false }));
+    assert.equal(invalid.details.failureCode, "invalid");
     assert.equal(grants, 0);
-    assert.match(confirmation, /example\.com/);
-    assert.match(confirmation, /test\/web-model/);
-    assert.match(confirmation, /headless temporary browser/);
+
+    const noAuth = await runtime.tools.get("web_scout").execute("no-auth", { task: "docs" }, undefined, undefined, context({
+      hasUI: false,
+      modelRegistry: { async getApiKeyAndHeaders() { return { ok: false }; } },
+    }));
+    assert.equal(noAuth.details.failureCode, "unavailable");
+    assert.equal(grants, 0);
+
+    const noModel = await runtime.tools.get("web_scout").execute("no-model", { task: "docs" }, undefined, undefined, context({ hasUI: false, model: undefined }));
+    assert.equal(noModel.details.failureCode, "unavailable");
+    assert.equal(grants, 0);
 
     runtime.events.on("pi-helios:web-scout-capability", (request) => request.respond({
       version: 1, owner: "pi-helios", childExtensionPath: "C:/other/web-scout-browser.ts", issueGrant() {},
     }));
-    const duplicate = await runtime.tools.get("web_scout").execute("id", { task: "docs" }, undefined, undefined, context());
+    const duplicate = await runtime.tools.get("web_scout").execute("duplicate", { task: "docs" }, undefined, undefined, context({ hasUI: false }));
     assert.equal(duplicate.details.failureCode, "unavailable");
+    assert.equal(grants, 0);
   } finally { runtime.restore(); }
 });
 
-test("Web Scout requests a headless browser after fresh consent", async () => {
-  const runtime = await harness();
-  let confirmation = "";
+test("Web Scout launches headless without UI or confirmation and revokes grant", async () => {
+  let childArgs: string[] = [];
+  const run = async (args: string[]): Promise<ScoutRun> => {
+    childArgs = args;
+    return {
+      text: "cited report", stderr: "", durationMs: 1,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+      turns: [], truncated: false, exitCode: 0, activity: [], budgetExceeded: false,
+      finalizationAttempted: false, finalizationSucceeded: false, contextTokens: 0, cacheReadTokens: 0,
+    };
+  };
+  const runtime = await harness(run);
   let options: any;
+  let revoked = 0;
+  let confirmations = 0;
+  const statuses: Array<string | undefined> = [];
   runtime.events.on("pi-helios:web-scout-capability", (request) => request.respond({
     version: 1, owner: "pi-helios", childExtensionPath: "C:/bundle/web-scout-browser.ts",
-    async issueGrant(value: any) { options = value; throw new Error("stop after grant"); },
+    async issueGrant(value: any) {
+      options = value;
+      return { value: "grant", async revoke() { revoked++; } };
+    },
   }));
   try {
-    await assert.rejects(runtime.tools.get("web_scout").execute("id", {
+    const result = await runtime.tools.get("web_scout").execute("id", {
       task: "read current docs", startUrls: ["https://example.com"], maxPages: 2,
-    }, undefined, undefined, context({ ui: {
-      async confirm(_title: string, message: string) { confirmation = message; return true; }, setStatus() {},
-    } })), /stop after grant/);
-    assert.match(confirmation, /headless temporary browser/);
+    }, undefined, undefined, context({ hasUI: false, ui: {
+      async confirm() { confirmations++; return false; }, setStatus() {},
+    } }));
+    assert.equal(result.content[0].text, "cited report");
+
+    const uiResult = await runtime.tools.get("web_scout").execute("ui", { task: "read current docs", maxPages: 2 }, undefined, undefined, context({ ui: {
+      async confirm() { confirmations++; return false; },
+      setStatus(_key: string, value: string | undefined) { statuses.push(value); },
+    } }));
+    assert.equal(uiResult.content[0].text, "cited report");
+    assert.equal(confirmations, 0);
+    assert.equal(revoked, 2);
+    assert.equal(statuses.at(-1), undefined);
     assert.deepEqual(options, { maxPages: 2, maxActions: 20, headed: false });
+    for (const flag of ["--no-extensions", "--no-approve", "--no-builtin-tools", "--no-session"]) assert.ok(childArgs.includes(flag));
+    assert.ok(childArgs.includes("scout_browser"));
+  } finally { runtime.restore(); }
+});
+
+test("Web Scout revokes grant when child launch throws", async () => {
+  const runtime = await harness(async () => { throw new Error("child launch failed"); });
+  let revoked = 0;
+  runtime.events.on("pi-helios:web-scout-capability", (request) => request.respond({
+    version: 1, owner: "pi-helios", childExtensionPath: "C:/bundle/web-scout-browser.ts",
+    async issueGrant() { return { value: "grant", async revoke() { revoked++; } }; },
+  }));
+  try {
+    await assert.rejects(runtime.tools.get("web_scout").execute("id", { task: "docs" }, undefined, undefined, context({ hasUI: false })), /child launch failed/);
+    assert.equal(revoked, 1);
   } finally { runtime.restore(); }
 });
 

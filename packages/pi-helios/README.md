@@ -37,7 +37,7 @@ chrome --remote-debugging-port=9222 --user-data-dir=C:\temp\pi-helios-cdp
 
 - `start`, `attach`, `close`, `detach`
 - `navigate`, `back`, `forward`, `reload`
-- `snapshot`, `find`, `screenshot`
+- `snapshot`, `continue`, `find`, `screenshot`
 - `click`, `fill`, `press`, `hover`, `select`, `check`, `uncheck`
 - `tabs` with `list`, `select`, `create`, or `close`
 
@@ -56,7 +56,9 @@ Prefer targeted search over a full snapshot when the element text is known:
 { action: "find", regex: "/sign (in|up)/i" }
 ```
 
-`find` accepts exactly one plain-text or regular-expression query, searches the current accessibility snapshot, and returns matching nodes with nearby context and usable refs. Queries are limited to 500 characters.
+`find` accepts exactly one plain-text or regular-expression query, searches the current accessibility snapshot, and returns matching nodes with nearby context and usable refs. Queries are limited to 500 characters. Keep queries narrow; large match sets return a bounded prefix, total match count, remaining counts, and a refinement hint.
+
+Browser output uses action-specific limits: explicit snapshots allow up to 200 lines / 20 KB, `find` up to 120 lines / 12 KB, and snapshots emitted by other actions up to 100 lines / 10 KB. Line or byte limit, whichever comes first, adds deterministic remaining metadata and an opaque one-use continuation cursor. Use `{ action: "continue", cursor: "..." }` to read the next cached redacted chunk without another browser subprocess. A continued chunk may return another cursor. New snapshot/find output and page-changing actions invalidate older cursors; each chunk also replaces usable element refs from the prior chunk. Prefer snapshot depth 4–6 first or target a returned ref for more detail. Web Scout uses its own smaller broker limits and supports the same continuation flow.
 
 Use element references from latest snapshot, such as `e12`; arbitrary selectors are rejected. URLs permit HTTP(S) and `about:blank`, not credentials or local files. Snapshot depth, text, output, errors, tabs, and screenshots are bounded. Screenshots remain limited to valid PNG files up to 25 MB.
 
@@ -95,7 +97,7 @@ No UI means session creation, attachment, screenshots, and browser control are r
 
 ## Web Scout broker
 
-When bundled with pi-scout, Helios advertises a versioned child-browser capability without sharing normal Helios sessions. Each approved `web_scout` call receives a one-use, 60-second grant for a dedicated headless owned browser. Generic `helios_browser` owned sessions retain their separate visibility setting. Child controls are limited to public navigation, bounded snapshots, trusted link-URL resolution, and back navigation.
+When bundled with pi-scout, Helios advertises a versioned child-browser capability without sharing normal Helios sessions. Each approved `web_scout` call receives a one-use, 60-second grant for a dedicated headless owned browser. Generic `helios_browser` owned sessions retain their separate visibility setting. Child controls are limited to public navigation, bounded/continued snapshots, trusted link-URL resolution, and back navigation.
 
 Web Scout traffic uses an authenticated loopback proxy that validates and pins public DNS destinations for HTTP requests and HTTPS tunnels, including redirects and subresources. Private, loopback, link-local, metadata, reserved, multicast, documentation, and transition ranges are blocked. Generic `helios_browser` behavior remains unchanged.
 

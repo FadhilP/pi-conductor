@@ -1,6 +1,6 @@
 # pi-scout
 
-Bounded repository reconnaissance, consent-gated isolated public-web research, and explicit Pi-session search for [Pi](https://pi.dev).
+Bounded repository reconnaissance, isolated public-web research, and explicit Pi-session search for [Pi](https://pi.dev).
 
 ## Installation
 
@@ -40,7 +40,7 @@ The isolated child always loads Scout-owned read-only `read` and `search_excerpt
 
 ## Web Scout
 
-Pi receives `web_scout(task, startUrls?, maxPages?)` for current public-web research requiring rendered pages. Every call requires fresh interactive confirmation naming browser limits, selected model, starting hosts, provider exposure, and public-site network exposure.
+Pi receives `web_scout(task, startUrls?, maxPages?)` for current public-web research requiring rendered pages. Calls launch immediately without Pi Guard or per-call confirmation because every run uses a fresh isolated browser with no user state. The selected provider still receives the task and returned page text; public sites receive browser traffic, network address, and research terms.
 
 Web Scout launches a headless temporary Helios-owned browser with no user cookies, tabs, profiles, or logins. A separate child Pi receives only `scout_browser` with `navigate`, `snapshot`, `follow`, and `back`. It cannot attach to user browsers, click arbitrary controls, fill forms, execute model-supplied scripts, access storage through tools, upload, download, or capture screenshots. Public pages may execute their own JavaScript and use temporary isolated cookies/storage; all are discarded when browser closes. Browser and child session close after each call.
 

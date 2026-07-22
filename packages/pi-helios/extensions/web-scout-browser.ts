@@ -12,7 +12,8 @@ function describe(result: BrowserOperationResult, pages: number, maxPages: numbe
   if (result.page) lines.push(`Page: ${result.page.title} (${result.page.url})`);
   if (result.snapshot) lines.push(`Snapshot:\n${result.snapshot}`);
   if (result.snapshotRedactions) lines.push(`Redactions: ${result.snapshotRedactions}.`);
-  if (result.snapshotTruncated) lines.push(`Snapshot truncated; omitted ${result.snapshotOmittedLines ?? 0} lines.`);
+  if (result.snapshotTruncated) lines.push(`Snapshot truncated; ${result.snapshotOmittedLines ?? 0} lines remain.`);
+  if (result.snapshotContinuation) lines.push(`Continuation: ${result.snapshotContinuation}`);
   if (result.metadataStale) lines.push("Page metadata cached.");
   else if (result.metadataAvailable === false) lines.push("Page metadata unavailable.");
   return lines.join("\n");
@@ -23,7 +24,12 @@ export default async function webScoutBrowserExtension(pi: ExtensionAPI) {
   const proxy = await PublicNetworkProxy.start({ maxRequests: Math.min(1_000, grant.maxActions * 20), maxBytes: 100 * 1024 * 1024 });
   const manager = new BrowserSessionManager(
     (command, args, options) => pi.exec(command, args, options),
-    (exec) => PlaywrightCli.create(exec, { maxSnapshotLines: 250, maxSnapshotBytes: 20 * 1024 }),
+    (exec) => PlaywrightCli.create(exec, {
+      maxSnapshotLines: 160,
+      maxSnapshotBytes: 14 * 1024,
+      maxActionSnapshotLines: 100,
+      maxActionSnapshotBytes: 10 * 1024,
+    }),
   );
   const sessionId = `web-scout-${randomUUID()}`;
   let started = false;
@@ -61,7 +67,7 @@ export default async function webScoutBrowserExtension(pi: ExtensionAPI) {
   const actionSnapshot = async (result: BrowserOperationResult, signal?: AbortSignal) => result.snapshot === undefined ? snapshot(signal) : acceptSnapshot(result);
   const response = (action: string, result: BrowserOperationResult) => ({
     content: [{ type: "text" as const, text: describe(result, pages, grant.maxPages, actions, grant.maxActions) }],
-    details: { action, pages, actions, page: result.page, truncated: result.snapshotTruncated, redactions: result.snapshotRedactions },
+    details: { action, pages, actions, page: result.page, truncated: result.snapshotTruncated, continuation: result.snapshotContinuation, redactions: result.snapshotRedactions },
   });
 
   pi.on("session_shutdown", async () => {
@@ -75,12 +81,13 @@ export default async function webScoutBrowserExtension(pi: ExtensionAPI) {
     description: "Navigate an isolated public-web browser, read bounded snapshots, follow current link references, or go back. Public HTTP(S) only; no private networks, user browser attachment, arbitrary clicks, forms, scripts, storage, uploads, downloads, or screenshots.",
     promptSnippet: "Read public web pages through isolated bounded browser navigation",
     promptGuidelines: [
-      "Use scout_browser only for supplied Web Scout research task. Prefer direct public URLs, snapshot before following links, follow only link refs from latest snapshot, never attempt login, account, purchase, messaging, publishing, permissions, or destructive workflows.",
+      "Use scout_browser only for supplied Web Scout research task. Prefer direct public URLs, snapshot before following links, continue truncated snapshots with returned cursor, follow only link refs from latest chunk, never attempt login, account, purchase, messaging, publishing, permissions, or destructive workflows.",
     ],
     parameters: Type.Object({
-      action: StringEnum(["navigate", "snapshot", "follow", "back"] as const),
+      action: StringEnum(["navigate", "snapshot", "continue", "follow", "back"] as const),
       url: Type.Optional(Type.String({ maxLength: 2048 })),
       target: Type.Optional(Type.String({ pattern: "^e[0-9]+$", maxLength: 32 })),
+      cursor: Type.Optional(Type.String({ pattern: "^hc_[a-f0-9]{32}$", maxLength: 35 })),
     }, { additionalProperties: false }),
     executionMode: "sequential",
     async execute(_id, params, signal) {
@@ -88,7 +95,7 @@ export default async function webScoutBrowserExtension(pi: ExtensionAPI) {
       await ensureStarted(signal);
       if (params.action === "navigate") {
         if (!params.url) throw new Error("navigate requires url");
-        if (params.target !== undefined) throw new Error("navigate does not accept target");
+        if (params.target !== undefined || params.cursor !== undefined) throw new Error("navigate accepts only url");
         const url = await publicUrl(params.url);
         consumePage();
         const navigated = await manager.operate(sessionId, { kind: "navigate", url }, signal);
@@ -96,6 +103,12 @@ export default async function webScoutBrowserExtension(pi: ExtensionAPI) {
         return response(params.action, result);
       }
       if (params.url !== undefined) throw new Error(`${params.action} does not accept url`);
+      if (params.action === "continue") {
+        if (!params.cursor) throw new Error("continue requires cursor");
+        if (params.target !== undefined) throw new Error("continue does not accept target");
+        return response(params.action, acceptSnapshot(await manager.operate(sessionId, { kind: "continue", cursor: params.cursor }, signal)));
+      }
+      if (params.cursor !== undefined) throw new Error(`${params.action} does not accept cursor`);
       let actionResult: BrowserOperationResult | undefined;
       if (params.action === "follow") {
         if (!params.target) throw new Error("follow requires target");

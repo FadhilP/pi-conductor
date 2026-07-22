@@ -8,6 +8,7 @@ import { PlaywrightCli, HeliosCliError, validateNavigationUrl } from "../src/pla
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const SESSION = "helios-0123456789ab-0123456789ab";
+const OTHER_SESSION = "helios-fedcba987654-fedcba987654";
 
 test("adapter invokes pinned CLI with argument array and private cwd", async () => {
   let call: { command: string; args: string[]; options: any } | undefined;
@@ -39,9 +40,32 @@ test("find uses bounded CLI snapshot search output", async () => {
     assert.deepEqual(calls[0].slice(1), ["--json", `-s=${SESSION}`, "find", "Add to cart"]);
     assert.deepEqual(calls[1].slice(1), ["--json", `-s=${SESSION}`, "find", "--regex", "/add to cart/i"]);
     assert.equal(text.snapshot, found);
+    assert.equal(text.value.result, undefined);
+    assert.equal(text.findMatches, 1);
     assert.equal(regex.snapshot, found);
+    assert.equal(regex.findMatches, 1);
     await assert.rejects(cli.run(SESSION, { kind: "find" }), /exactly one/);
     await assert.rejects(cli.run(SESSION, { kind: "find", text: "x", regex: "x" }), /exactly one/);
+  } finally { await cli.dispose(); }
+});
+
+test("find match count ignores page content after the result header", async () => {
+  const raw = "- text no summary header\nFound 999 matches in page content";
+  const cli = await PlaywrightCli.create(async () => ({ code: 0, stdout: JSON.stringify({ result: raw }), stderr: "", killed: false }));
+  try {
+    const result = await cli.run(SESSION, { kind: "find", text: "Found" });
+    assert.equal(result.findMatches, undefined);
+  } finally { await cli.dispose(); }
+});
+
+test("find redacts secrets and drops raw string results", async () => {
+  const raw = 'Found 1 match for "Password":\n\n- textbox "Password" [ref=e7]: hunter2';
+  const cli = await PlaywrightCli.create(async () => ({ code: 0, stdout: JSON.stringify({ result: raw }), stderr: "", killed: false }));
+  try {
+    const result = await cli.run(SESSION, { kind: "find", text: "Password" });
+    assert.match(result.snapshot!, /value redacted/);
+    assert.doesNotMatch(JSON.stringify(result), /hunter2/);
+    assert.equal(result.value.result, undefined);
   } finally { await cli.dispose(); }
 });
 
@@ -84,6 +108,12 @@ test("adapter rejects unsafe inputs and malformed or oversized output", async ()
   const oversized = await PlaywrightCli.create(async () => ({ code: 0, stdout: "x".repeat(300_000), stderr: "", killed: false }));
   await assert.rejects(oversized.run(SESSION, { kind: "tab-list" }), /256KB/);
   await oversized.dispose();
+
+  for (const bytes of [0, 1, 2, 3]) {
+    await assert.rejects(PlaywrightCli.create(async () => ({ code: 0, stdout: "{}", stderr: "", killed: false }), { maxSnapshotBytes: bytes }), /at least 4/);
+  }
+  await assert.rejects(PlaywrightCli.create(async () => ({ code: 0, stdout: "{}", stderr: "", killed: false }), { maxSnapshotLines: 0 }), /at least 1/);
+  await assert.rejects(PlaywrightCli.create(async () => ({ code: 0, stdout: "{}", stderr: "", killed: false }), { maxActionSnapshotLines: 1.5 }), /integer/);
 });
 
 test("adapter classifies only the pinned missing-session error", async () => {
@@ -127,25 +157,152 @@ test("adapter validates screenshot and redacts credentials in bounded snapshots"
   } finally { await cli.dispose(); }
 });
 
-test("snapshot truncation reports deterministic omitted counts", async () => {
+test("action-specific snapshot limits report deterministic omitted counts", async () => {
   const raw = Array.from({ length: 505 }, (_, index) => `- text line ${index}`).join("\n");
   const cli = await PlaywrightCli.create(async () => ({ code: 0, stdout: JSON.stringify({ snapshot: raw }), stderr: "", killed: false }));
   try {
-    const result = await cli.run(SESSION, { kind: "snapshot" });
+    const snapshot = await cli.run(SESSION, { kind: "snapshot" });
+    assert.equal(snapshot.snapshotTruncated, true);
+    assert.equal(snapshot.snapshotOmittedLines, 305);
+    assert.ok((snapshot.snapshotOmittedBytes ?? 0) > 0);
+    assert.equal(snapshot.snapshot?.split("\n").length, 200);
+
+    const action = await cli.run(SESSION, { kind: "navigate", url: "https://example.com" });
+    assert.equal(action.snapshotOmittedLines, 405);
+    assert.equal(action.snapshot?.split("\n").length, 100);
+  } finally { await cli.dispose(); }
+});
+
+test("continuation pages cached redacted output without another browser command", async () => {
+  const raw = [
+    "- heading First [ref=e1]",
+    "- link Second [ref=e2]",
+    '- textbox "Password" [ref=e3]: hunter2',
+    "- button Fourth [ref=e4]",
+    "- link Fifth [ref=e5]",
+    "- button Sixth [ref=e6]",
+  ].join("\n");
+  let calls = 0;
+  const cli = await PlaywrightCli.create(async () => {
+    calls++;
+    return { code: 0, stdout: JSON.stringify(calls === 1 ? { snapshot: raw } : { result: "- 0: (current) [Example](https://example.com/)" }), stderr: "", killed: false };
+  }, { maxSnapshotLines: 2, maxSnapshotBytes: 1024 });
+  try {
+    const first = await cli.run(SESSION, { kind: "snapshot" });
+    assert.match(first.snapshot!, /ref=e1/);
+    assert.match(first.snapshot!, /ref=e2/);
+    assert.ok(first.snapshotContinuation);
+
+    await assert.rejects(cli.run(OTHER_SESSION, { kind: "continue", cursor: first.snapshotContinuation! }), /stale/);
+    await cli.run(SESSION, { kind: "tab-list" });
+    const second = await cli.run(SESSION, { kind: "continue", cursor: first.snapshotContinuation! });
+    assert.equal(calls, 2);
+    assert.doesNotMatch(second.snapshot!, /hunter2/);
+    assert.match(second.snapshot!, /value redacted/);
+    assert.match(second.snapshot!, /ref=e4/);
+    assert.ok(second.snapshotContinuation);
+    await assert.rejects(cli.run(SESSION, { kind: "continue", cursor: first.snapshotContinuation! }), /stale/);
+
+    const third = await cli.run(SESSION, { kind: "continue", cursor: second.snapshotContinuation! });
+    assert.match(third.snapshot!, /ref=e5/);
+    assert.match(third.snapshot!, /ref=e6/);
+    assert.equal(third.snapshotTruncated, false);
+    assert.equal(third.snapshotContinuation, undefined);
+    assert.equal(calls, 2);
+  } finally { await cli.dispose(); }
+});
+
+test("continuation progresses across oversized multibyte lines", async () => {
+  const raw = `${"é".repeat(100)}\n- button End [ref=e9]`;
+  let calls = 0;
+  const cli = await PlaywrightCli.create(async () => {
+    calls++;
+    return { code: 0, stdout: JSON.stringify({ snapshot: raw }), stderr: "", killed: false };
+  }, { maxSnapshotLines: 1, maxSnapshotBytes: 40 });
+  try {
+    let result = await cli.run(SESSION, { kind: "snapshot" });
+    let pages = 1;
+    while (result.snapshotContinuation) {
+      assert.ok(Buffer.byteLength(result.snapshot!) <= 40);
+      result = await cli.run(SESSION, { kind: "continue", cursor: result.snapshotContinuation });
+      if (++pages > 20) assert.fail("continuation did not progress");
+    }
+    assert.match(result.snapshot!, /ref=e9/);
+    assert.equal(calls, 1);
+  } finally { await cli.dispose(); }
+});
+
+test("disposing adapter clears pending continuation", async () => {
+  const raw = "- button One [ref=e1]\n- button Two [ref=e2]";
+  const cli = await PlaywrightCli.create(async () => ({ code: 0, stdout: JSON.stringify({ snapshot: raw }), stderr: "", killed: false }), { maxSnapshotLines: 1 });
+  const result = await cli.run(SESSION, { kind: "snapshot" });
+  assert.ok(result.snapshotContinuation);
+  await cli.dispose();
+  await assert.rejects(cli.run(SESSION, { kind: "continue", cursor: result.snapshotContinuation! }), /stale/);
+});
+
+test("page-changing and replacement actions invalidate continuation", async () => {
+  const raw = Array.from({ length: 5 }, (_, index) => `- button ${index} [ref=e${index}]`).join("\n");
+  let failNavigate = false;
+  const cli = await PlaywrightCli.create(async (_command, args) => {
+    if (args.includes("goto") && failNavigate) return { code: 1, stdout: "", stderr: "failed", killed: false };
+    return { code: 0, stdout: JSON.stringify({ snapshot: raw }), stderr: "", killed: false };
+  }, { maxSnapshotLines: 2, maxSnapshotBytes: 1024 });
+  try {
+    const first = await cli.run(SESSION, { kind: "snapshot" });
+    const replacement = await cli.run(SESSION, { kind: "snapshot" });
+    await assert.rejects(cli.run(SESSION, { kind: "continue", cursor: first.snapshotContinuation! }), /stale/);
+
+    failNavigate = true;
+    await assert.rejects(cli.run(SESSION, { kind: "navigate", url: "https://example.com" }), /command failed/i);
+    await assert.rejects(cli.run(SESSION, { kind: "continue", cursor: replacement.snapshotContinuation! }), /stale/);
+  } finally { await cli.dispose(); }
+});
+
+test("find has a smaller cap and preserves total match count", async () => {
+  const raw = [`Found 140 matches for /item/:`, "", ...Array.from({ length: 140 }, (_, index) => `- button item ${index} [ref=e${index}]`)].join("\n");
+  const cli = await PlaywrightCli.create(async () => ({ code: 0, stdout: JSON.stringify({ result: raw }), stderr: "", killed: false }));
+  try {
+    const result = await cli.run(SESSION, { kind: "find", regex: "/item/" });
+    assert.equal(result.findMatches, 140);
     assert.equal(result.snapshotTruncated, true);
-    assert.equal(result.snapshotOmittedLines, 5);
-    assert.ok((result.snapshotOmittedBytes ?? 0) > 0);
-    assert.match(result.snapshot!, /\[Snapshot truncated by Helios\]$/);
+    assert.equal(result.snapshot?.split("\n").length, 120);
+    assert.equal(result.snapshotOmittedLines, 22);
+    assert.equal(result.value.result, undefined);
   } finally { await cli.dispose(); }
 });
 
 test("custom snapshot limits bound Web Scout output", async () => {
   const raw = Array.from({ length: 10 }, (_, index) => `- link ${index} [ref=e${index}]`).join("\n");
-  const cli = await PlaywrightCli.create(async () => ({ code: 0, stdout: JSON.stringify({ result: { snapshot: raw } }), stderr: "", killed: false }), { maxSnapshotLines: 2, maxSnapshotBytes: 1024 });
+  const cli = await PlaywrightCli.create(async () => ({ code: 0, stdout: JSON.stringify({ result: { snapshot: raw } }), stderr: "", killed: false }), {
+    maxSnapshotLines: 2,
+    maxSnapshotBytes: 1024,
+    maxActionSnapshotLines: 2,
+    maxActionSnapshotBytes: 64,
+  });
   try {
     const result = await cli.run(SESSION, { kind: "snapshot" });
-    assert.equal(result.snapshot?.split("\n").length, 3);
+    assert.equal(result.snapshot?.split("\n").length, 2);
+    assert.equal(result.snapshotOmittedLines, 8);
     assert.equal((result.value.result as Record<string, unknown>).snapshot, undefined);
+
+    const action = await cli.run(SESSION, { kind: "navigate", url: "https://example.com" });
+    assert.match(action.snapshot!, /ref=e0/);
+    assert.match(action.snapshot!, /ref=e1/);
+    assert.equal(action.snapshotOmittedLines, 8);
+  } finally { await cli.dispose(); }
+});
+
+test("snapshot byte limits count multibyte text", async () => {
+  const raw = Array.from({ length: 4 }, () => `- ${"é".repeat(100)}`).join("\n");
+  const cli = await PlaywrightCli.create(async () => ({ code: 0, stdout: JSON.stringify({ snapshot: raw }), stderr: "", killed: false }), { maxSnapshotLines: 100, maxSnapshotBytes: 250 });
+  try {
+    const result = await cli.run(SESSION, { kind: "snapshot" });
+    assert.equal(result.snapshot?.split("\n").length, 1);
+    assert.equal(result.snapshotOmittedLines, 3);
+    assert.equal(result.snapshotTruncated, true);
+    assert.ok((result.snapshotOmittedBytes ?? 0) > 600);
+    assert.ok(Buffer.byteLength(result.snapshot!) <= 250);
   } finally { await cli.dispose(); }
 });
 

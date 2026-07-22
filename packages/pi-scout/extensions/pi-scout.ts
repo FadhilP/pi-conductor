@@ -133,7 +133,7 @@ export function searchTelemetry(activity: readonly ScoutActivity[], seen: Set<st
   return { searches, repeatedSearches };
 }
 
-export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
+export default function scoutExtension(pi: ExtensionAPI, runChild = runPi) {
   let repoRuns = 0;
   let repoCallQueue = Promise.resolve();
   const seenRepoSearches = new Set<string>();
@@ -440,7 +440,7 @@ export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
           "--system-prompt",
           REPO_SCOUT_PROMPT,
         ];
-        const run = await runRepoScout(args, {
+        const run = await runChild(args, {
           cwd: ctx.cwd,
           prompt,
           signal,
@@ -547,10 +547,10 @@ export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
   pi.registerTool({
     name: "web_scout",
     label: "Web Scout",
-    description: "Consent-gated isolated public-web research using a temporary Helios browser and a separate Scout model. Public HTTP(S) only; blocks private/reserved networks and exposes no user browser state. Returns bounded URL-cited evidence.",
-    promptSnippet: "Research public web pages in an isolated consented browser and return bounded URL-cited evidence",
+    description: "Isolated public-web research using a fresh temporary Helios browser and a separate Scout model. Public HTTP(S) only; blocks private/reserved networks and exposes no user browser state. Returns bounded URL-cited evidence.",
+    promptSnippet: "Research public web pages in a fresh isolated browser and return bounded URL-cited evidence",
     promptGuidelines: [
-      "Use web_scout only when user asks for current public-web research needing browser-rendered pages. Every call requires user confirmation. Give a concrete research task and useful starting URLs when known. Keep evaluation and consequential decisions in main model. Never use web_scout for login, accounts, purchases, messages, publishing, permissions, forms, downloads, uploads, private networks, or monitoring.",
+      "Use web_scout only when user asks for current public-web research needing browser-rendered pages. It launches a fresh isolated browser without per-call confirmation. Give a concrete research task and useful starting URLs when known. Keep evaluation and consequential decisions in main model. Never use web_scout for login, accounts, purchases, messages, publishing, permissions, forms, downloads, uploads, private networks, or monitoring.",
     ],
     parameters: Type.Object({
       task: Type.String({ minLength: 1, maxLength: 1000, description: "Concrete public-web research question and evidence needed" }),
@@ -560,7 +560,6 @@ export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
     executionMode: "sequential",
     async execute(_id, params, signal, onUpdate, ctx) {
       if (!isScoutEnabled(await loadConfig())) return { content: [{ type: "text" as const, text: "Web Scout inactive. Configure it with /scout or use /scout reset." }], details: { failureCode: "disabled" } };
-      if (!ctx.hasUI) return { content: [{ type: "text" as const, text: "Web scout requires interactive confirmation." }], details: { failureCode: "confirmation_unavailable" } };
       const task = params.task.trim();
       if (!task) return { content: [{ type: "text" as const, text: "Web scout task must not be empty." }], details: { failureCode: "invalid" } };
       let startUrls: string[];
@@ -574,12 +573,6 @@ export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
       if (!auth.ok || !auth.apiKey) return { content: [{ type: "text" as const, text: "Web scout unavailable: selected model has no credentials." }], details: { failureCode: "unavailable", model: modelName(model) } };
       const maxPages = params.maxPages ?? 8;
       const maxActions = Math.min(80, maxPages * 6 + 8);
-      const sites = startUrls.length ? [...new Set(startUrls.map((value) => new URL(value).hostname))].join(", ") : "public sites selected for this task";
-      const approved = await ctx.ui.confirm(
-        "Allow isolated web research?",
-        `Web Scout will launch a headless temporary browser with no user cookies or logins and visit ${sites}. Up to ${maxPages} pages and ${maxActions} browser actions are allowed. Task and returned page text will be sent to ${modelName(model)}; public sites receive browser traffic and your network address. Private/reserved networks, forms, arbitrary clicks, uploads, downloads, model-supplied scripts, storage-access tools, screenshots, and attached browsers are blocked. Public pages may execute their own scripts and use temporary isolated storage that is discarded with the browser. Research terms may be sent to visited sites. Allow once?`,
-      );
-      if (!approved) return { content: [{ type: "text" as const, text: "User declined Web Scout research." }], details: { declined: true } };
       const grant = await capability.issueGrant({ maxPages, maxActions, headed: false });
       if (ctx.hasUI) ctx.ui.setStatus("pi-scout", "scout: researching public web…");
       onUpdate?.({ content: [{ type: "text", text: "Web Scout launching isolated browser…" }], details: { model: modelName(model), state: "running" } });
@@ -601,7 +594,7 @@ export default function scoutExtension(pi: ExtensionAPI, runRepoScout = runPi) {
           "--no-builtin-tools", "--tools", "scout_browser", "--model", modelName(model),
           "--thinking", await resolveThinking(), "--system-prompt", WEB_SCOUT_PROMPT,
         ];
-        const run = await runPi(args, {
+        const run = await runChild(args, {
           cwd: ctx.cwd,
           prompt,
           signal,

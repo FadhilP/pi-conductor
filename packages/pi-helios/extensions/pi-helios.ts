@@ -15,18 +15,22 @@ const captureSchema = Type.Object({
   title: Type.String({ description: "Required Windows window-title substring", maxLength: 500 }),
 });
 
-const BROWSER_ACTIONS = ["start", "attach", "navigate", "snapshot", "find", "screenshot", "click", "fill", "press", "hover", "select", "check", "uncheck", "back", "forward", "reload", "tabs", "detach", "close"] as const;
+const BROWSER_ACTIONS = ["start", "attach", "navigate", "snapshot", "continue", "find", "screenshot", "click", "fill", "press", "hover", "select", "check", "uncheck", "back", "forward", "reload", "tabs", "detach", "close"] as const;
+const PAGE_CONTEXT_ACTIONS = new Set(["start", "attach", "navigate", "snapshot", "find", "click", "press", "back", "forward", "reload", "tab-list", "tab-new", "tab-select", "tab-close"]);
+const PAGE_CHANGE_ACTIONS = new Set(["start", "attach", "navigate", "click", "press", "back", "forward", "reload", "tab-list", "tab-new", "tab-select", "tab-close"]);
+const OWNERSHIP_ACTIONS = new Set(["start", "attach", "close", "detach"]);
 const browserActionFields = {
   url: Type.Optional(Type.String({ maxLength: 4096 })),
   attachMode: Type.Optional(StringEnum(["cdp", "extension"] as const)),
   endpoint: Type.Optional(Type.String({ maxLength: 2048 })),
   browser: Type.Optional(StringEnum(["chrome", "msedge"] as const, { description: "Browser for extension attachment; ignored by start" })),
   target: Type.Optional(Type.String({ maxLength: 32, description: "Element reference from latest snapshot, such as e12" })),
-  text: Type.Optional(Type.String({ maxLength: 10000 })),
-  regex: Type.Optional(Type.String({ maxLength: 500 })),
+  text: Type.Optional(Type.String({ maxLength: 10000, description: "Exact text to find; keep narrow to avoid large match sets" })),
+  regex: Type.Optional(Type.String({ maxLength: 500, description: "Regular expression to find; keep specific to avoid large match sets" })),
   key: Type.Optional(Type.String({ maxLength: 64 })),
   value: Type.Optional(Type.String({ maxLength: 1000 })),
-  depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+  depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Snapshot depth; prefer 4-6 first, then target a returned ref for more detail" })),
+  cursor: Type.Optional(Type.String({ pattern: "^hc_[a-f0-9]{32}$", maxLength: 35, description: "One-use cursor returned by truncated snapshot, find, or action output" })),
   fullPage: Type.Optional(Type.Boolean()),
   tabAction: Type.Optional(StringEnum(["list", "select", "create", "close"] as const)),
   tabIndex: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
@@ -64,6 +68,7 @@ function browserAction(params: BrowserParams): BrowserAction {
   switch (params.action) {
     case "navigate": rejectExtra(params, ["url"]); return { kind: "navigate", url: requireField(params, "url") };
     case "snapshot": rejectExtra(params, ["target", "depth"]); return { kind: "snapshot", target: params.target, depth: params.depth };
+    case "continue": rejectExtra(params, ["cursor"]); return { kind: "continue", cursor: requireField(params, "cursor") };
     case "find": {
       rejectExtra(params, ["text", "regex"]);
       if (Boolean(params.text) === Boolean(params.regex)) throw new Error("find requires exactly one of text or regex");
@@ -91,16 +96,20 @@ function browserAction(params: BrowserParams): BrowserAction {
   }
 }
 
-function describe(result: { action: string; ownership: string; outcome: string; durationMs?: number; metadataAvailable?: boolean; metadataStale?: boolean; page?: { index: number; title: string; url: string }; tabs?: unknown[]; snapshot?: string; snapshotRedactions?: number; snapshotTruncated?: boolean; snapshotOmittedLines?: number; snapshotOmittedBytes?: number; cleanupWarnings?: string[] }): string {
-  const lines = [`Browser ${result.action} ${result.outcome}.`, `Ownership: ${result.ownership}.`];
-  if (result.durationMs !== undefined) lines.push(`Duration: ${result.durationMs}ms.`);
-  if (result.metadataStale) lines.push("Tab metadata cached.");
-  else if (result.metadataAvailable === false) lines.push("Tab metadata unavailable; primary browser action completed.");
-  if (result.page) lines.push(`Tab ${result.page.index}: ${result.page.title} (${result.page.url})`);
-  if (result.tabs) lines.push(`Tabs: ${JSON.stringify(result.tabs)}`);
+function describe(result: { action: string; ownership: string; outcome: string; metadataAvailable?: boolean; metadataStale?: boolean; page?: { index: number; title: string; url: string }; tabs?: Array<{ index: number; title: string; url: string }>; snapshot?: string; snapshotRedactions?: number; snapshotTruncated?: boolean; snapshotOmittedLines?: number; snapshotOmittedBytes?: number; findMatches?: number; snapshotContinuation?: string; cleanupWarnings?: string[] }): string {
+  const ownership = OWNERSHIP_ACTIONS.has(result.action) ? ` (${result.ownership})` : "";
+  const lines = [`Browser ${result.action} ${result.outcome}${ownership}.`];
+  if (PAGE_CONTEXT_ACTIONS.has(result.action)) {
+    if (result.metadataAvailable === false && !result.page) lines.push("Page metadata unavailable.");
+    else if (result.metadataStale && PAGE_CHANGE_ACTIONS.has(result.action)) lines.push("Page metadata may be stale.");
+    if (result.page) lines.push(`Page: ${result.page.title} (${result.page.url})`);
+  }
+  if (result.tabs) lines.push(`Tabs: ${result.tabs.map((tab) => `${tab.index}: ${tab.title} (${tab.url})`).join(" | ")}`);
   if (result.snapshot) lines.push(`Snapshot:\n${result.snapshot}`);
-  if (result.snapshotRedactions) lines.push(`Snapshot redactions: ${result.snapshotRedactions}.`);
-  if (result.snapshotTruncated) lines.push(`Snapshot omitted ${result.snapshotOmittedLines ?? 0} lines / ${result.snapshotOmittedBytes ?? 0} bytes.`);
+  if (result.snapshotRedactions) lines.push(`Redactions: ${result.snapshotRedactions}.`);
+  if (result.snapshotTruncated) lines.push(`Remaining: ${result.snapshotOmittedLines ?? 0} lines / ${result.snapshotOmittedBytes ?? 0} bytes.`);
+  if (result.snapshotContinuation) lines.push(`Continuation: ${result.snapshotContinuation}`);
+  if (result.action === "find" && ((result.findMatches ?? 0) > 20 || result.snapshotTruncated)) lines.push("Refine find query or continue with returned cursor.");
   for (const warning of result.cleanupWarnings ?? []) lines.push(`Warning: ${warning}.`);
   return lines.join("\n");
 }
@@ -246,12 +255,14 @@ export default function heliosExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "helios_browser",
     label: "Helios Browser",
-    description: "Use one consented browser session for constrained navigation, targeted snapshot search, page snapshots, element-reference interaction, screenshots, and tabs. Results are bounded; no raw Playwright commands, scripts, storage, network interception, uploads, or downloads.",
+    description: "Use one consented browser session for constrained navigation, targeted snapshot search, bounded/continued page snapshots, element-reference interaction, screenshots, and tabs. No raw Playwright commands, scripts, storage, network interception, uploads, or downloads.",
     promptSnippet: "Use one consented browser session through constrained Playwright actions",
     promptGuidelines: [
       "Use helios_browser only for user-requested browser work; call start or attach first, then close or detach when done.",
       "Use helios_browser snapshot element references for page actions; never guess selectors.",
-      "Prefer helios_browser find over a full snapshot when text or a regular expression can locate the needed element; find returns matching snapshot nodes with bounded context.",
+      "Prefer helios_browser find over a full snapshot when narrow text or a specific regular expression can locate the needed element; refine queries when results are truncated or report many matches.",
+      "For snapshots, prefer depth 4-6 first or target a returned element ref; request greater depth only when needed.",
+      "When snapshot, find, or action output returns a continuation cursor, use continue with that cursor to read next chunk without another browser command. Each chunk replaces usable element refs from prior chunk.",
       "Batch predetermined, non-consequential actions when their targets and element references are already clear. Do not batch when the next target or action depends on inspecting an earlier snapshot or result; make a separate call instead.",
       "Do not use helios_browser for monitoring. User must supervise purchases, messages, publishing, destructive actions, or other consequential clicks.",
     ],

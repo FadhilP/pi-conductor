@@ -39,6 +39,8 @@ export interface BrowserOperationResult {
   snapshotTruncated?: boolean;
   snapshotOmittedLines?: number;
   snapshotOmittedBytes?: number;
+  findMatches?: number;
+  snapshotContinuation?: string;
   resolvedUrl?: string;
   artifactPath?: string;
   cleanupWarnings?: string[];
@@ -376,6 +378,8 @@ export class BrowserSessionManager {
       snapshotTruncated: result.snapshotTruncated,
       snapshotOmittedLines: result.snapshotOmittedLines,
       snapshotOmittedBytes: result.snapshotOmittedBytes,
+      findMatches: result.findMatches,
+      snapshotContinuation: result.snapshotContinuation,
       resolvedUrl: action === "link-url" ? resultText(result.value) : undefined,
       artifactPath: result.artifactPath,
     };
