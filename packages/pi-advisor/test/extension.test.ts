@@ -98,8 +98,80 @@ test("parallel Advisor calls serialize and report running duration", async () =>
     assert.deepEqual(maxTokens, [8_000, 8_000]);
     assert.equal(results[0].details.callNumber, 1);
     assert.equal(results[1].details.callNumber, 2);
+    assert.equal(Object.hasOwn(results[0].details, "failureMessage"), false);
     assert.deepEqual(results[0].details.duplicateTelemetry, { records: 0, chars: 0 });
     assert.match(prompts[1], /Prior guidance:\n\nadvice 1/);
+  } finally {
+    if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousDir;
+  }
+});
+
+test("advisor records bounded redacted failure diagnostics", async () => {
+  const previousDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = await mkdtemp(join(tmpdir(), "pi-advisor-failures-"));
+  await saveConfig({ version: 1, advisorModel: "test/model" });
+  const model = {
+    provider: "test", id: "model", contextWindow: 32_000, maxTokens: 8_192,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  };
+  const ctx = {
+    cwd: process.cwd(), hasUI: false, getSystemPrompt: () => "system",
+    modelRegistry: {
+      find: () => model,
+      async getApiKeyAndHeaders() { return { ok: true, apiKey: "key" }; },
+    },
+    sessionManager: { buildContextEntries: () => [], getSessionId: () => "session" },
+  };
+  const run = async (complete: () => any) => {
+    let tool: any;
+    advisor({
+      on: () => {},
+      registerTool: (value: any) => { tool = value; },
+      registerCommand: () => {},
+      events: { emit: () => {} },
+      getActiveTools: () => [],
+      setActiveTools: () => {},
+    } as any, complete as any);
+    return tool.execute("failure", { request: "review" }, undefined, undefined, ctx);
+  };
+  try {
+    const secret = `sk-${"x".repeat(40)}`;
+    const providerError = await run(async () => ({
+      content: [],
+      stopReason: "error",
+      errorMessage: `bad\napi_key=${secret}\u0000\u0085\u2028\u2029${"z".repeat(600)}`,
+    }));
+    assert.equal(providerError.details.failureCode, "invalid_response");
+    assert.equal(providerError.content[0].text, "Advisor failed nonfatally: invalid_response.");
+    assert.ok(providerError.details.failureMessage.length <= 500);
+    assert.doesNotMatch(providerError.details.failureMessage, /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+    assert.doesNotMatch(providerError.details.failureMessage, new RegExp(secret));
+    assert.match(providerError.details.failureMessage, /\[possible credential redacted\]/);
+
+    const bearer = await run(async () => ({
+      content: [], stopReason: "error", errorMessage: "authorization: Bearer short-token",
+    }));
+    assert.equal(bearer.details.failureMessage, "[possible credential redacted]");
+
+    const rateLimit = await run(async () => ({
+      content: [], stopReason: "error", errorMessage: "429 rate limit",
+    }));
+    assert.equal(rateLimit.details.failureCode, "rate_limited");
+    assert.equal(rateLimit.details.failureMessage, "429 rate limit");
+
+    const thrown = await run(async () => { throw new Error("socket closed"); });
+    assert.equal(thrown.details.failureCode, "invalid_response");
+    assert.equal(thrown.details.failureMessage, "socket closed");
+
+    const nonError = await run(async () => { throw { private: "value" }; });
+    assert.equal(nonError.details.failureMessage, "Advisor request failed without an Error message.");
+
+    const empty = await run(async () => ({ content: [], stopReason: "stop" }));
+    assert.equal(empty.details.failureMessage, "Provider returned no text content.");
+
+    const aborted = await run(async () => ({ content: [], stopReason: "aborted" }));
+    assert.equal(aborted.details.failureCode, "aborted");
   } finally {
     if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousDir;

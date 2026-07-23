@@ -4,7 +4,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { buildWorkerContext } from "../src/context.ts";
+import { buildWorkerContext, sanitizeFailureMessage } from "../src/context.ts";
 import {
   gruntMaxCostUsd, gruntMaxTurns, gruntMode, gruntParentContextChars, gruntTimeoutMs,
   isGruntEnabled, loadConfig, parseModelRef, saveConfig, thinkingLevels,
@@ -176,8 +176,8 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
       if (mode === "isolated") {
         try {
           isolated = await createIsolatedWorktree(exec, ctx.cwd, signal);
-        } catch (error: any) {
-          const message = error?.message ?? String(error);
+        } catch (error) {
+          const message = sanitizeFailureMessage(error, "Grunt isolation unavailable.");
           if (configuredMode !== "dynamic") throw new Error(`Grunt isolation unavailable: ${message}`);
           mode = "direct";
           isolationFallback = message;
@@ -228,6 +228,9 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
         });
         if (run.cwd !== workerCwd)
           throw new Error(`Worker runner did not confirm the ${mode} working directory`);
+        const workerFailureMessage = run.error
+          ? sanitizeFailureMessage(run.error, "Grunt worker failed.")
+          : undefined;
         if (!isolated) {
           const status = derivedStatus(run, 0);
           const recovery = status !== "completed";
@@ -237,7 +240,7 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
             "Execution mode: DIRECT; worker edits affected the current working directory immediately.",
             "Rollback and changed-path derivation: unavailable.",
             isolationFallback ? `Dynamic isolation fallback: ${isolationFallback}` : "",
-            recovery && run.error ? `Worker failure: ${run.error}` : "",
+            recovery && workerFailureMessage ? `Worker failure: ${workerFailureMessage}` : "",
             recovery && run.text ? `\nWorker report:\n${run.text}` : "",
           ].filter(Boolean);
           return {
@@ -248,6 +251,7 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
               model: modelName(model), thinking: params.thinking, durationMs: run.durationMs,
               usage: run.usage, metrics: workerMetrics(run, status, status), turns: run.turns, activity: run.activity, stopReason: run.stopReason,
               truncated: run.truncated, stderr: run.stderr, failureCode: run.failure,
+              ...(workerFailureMessage ? { failureMessage: workerFailureMessage } : {}),
             },
           };
         }
@@ -264,14 +268,18 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
           if (parentChanges.length) {
             status = "stale";
             failureCode = "stale_parent";
-            integrationError = `Parent changed while worker ran: ${parentChanges.join(", ")}.`;
+            integrationError = sanitizeFailureMessage(
+              `Parent changed while worker ran: ${parentChanges.join(", ")}.`,
+              "Parent changed while worker ran.",
+            );
           } else {
             try {
               await applyWorkerPatch(exec, isolated, worker.patch);
               applied = true;
-            } catch (error: any) {
-              integrationError = error?.message ?? String(error);
-              const stale = integrationError.startsWith("Parent changed immediately before patch apply:");
+            } catch (error) {
+              const rawIntegrationError = error instanceof Error ? error.message : "Worker patch apply failed.";
+              const stale = rawIntegrationError.startsWith("Parent changed immediately before patch apply:");
+              integrationError = sanitizeFailureMessage(rawIntegrationError, "Worker patch apply failed.");
               status = stale ? "stale" : "failed";
               failureCode = stale ? "stale_parent" : "apply_failed";
             }
@@ -297,7 +305,7 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
           recovery && outsideSuggestedPaths.length ? `Outside suggested paths: ${outsideSuggestedPaths.join(", ")}.` : "",
           artifactPath ? `Unapplied patch artifact: ${artifactPath}.` : "",
           integrationError ? `Integration failure: ${integrationError}` : "",
-          recovery && run.error ? `Worker failure: ${run.error}` : "",
+          recovery && workerFailureMessage ? `Worker failure: ${workerFailureMessage}` : "",
           recovery && run.text ? `\nWorker report:\n${run.text}` : "",
         ].filter(Boolean);
         return {
@@ -309,12 +317,16 @@ export default function gruntExtension(pi: ExtensionAPI, runWorker = runPi) {
             model: modelName(model), thinking: params.thinking, durationMs: run.durationMs,
             usage: run.usage, metrics: workerMetrics(run, workerStatus, status, worker.changedPaths.length), turns: run.turns, activity: run.activity, stopReason: run.stopReason,
             truncated: run.truncated, stderr: run.stderr, failureCode,
+            ...(integrationError || workerFailureMessage
+              ? { failureMessage: integrationError || workerFailureMessage }
+              : {}),
           },
         };
-      } catch (error: any) {
+      } catch (error) {
+        const failureMessage = sanitizeFailureMessage(error, "Grunt execution failed.");
         return {
-          content: [{ type: "text" as const, text: mode === "isolated" ? `Grunt failed in isolated worktree; parent unchanged. ${error?.message ?? String(error)}` : `Grunt failed in DIRECT mode; partial edits may remain. ${error?.message ?? String(error)}` }],
-          details: { status: "failed", mode, configuredMode, applied: mode === "isolated" ? false : undefined, isolated: mode === "isolated", failureCode: mode === "isolated" ? "isolation_error" : "worker_error", model: modelName(model), thinking: params.thinking },
+          content: [{ type: "text" as const, text: mode === "isolated" ? `Grunt failed in isolated worktree; parent unchanged. ${failureMessage}` : `Grunt failed in DIRECT mode; partial edits may remain. ${failureMessage}` }],
+          details: { status: "failed", mode, configuredMode, applied: mode === "isolated" ? false : undefined, isolated: mode === "isolated", failureCode: mode === "isolated" ? "isolation_error" : "worker_error", failureMessage, model: modelName(model), thinking: params.thinking },
         };
       } finally {
         clearInterval(heartbeat);

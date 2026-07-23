@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildWorkerContext } from "../src/context.ts";
+import { buildWorkerContext, sanitizeFailureMessage } from "../src/context.ts";
 
 test("worker context is bounded, redacted, and omits tool payloads", () => {
   const context = buildWorkerContext([
@@ -15,6 +15,23 @@ test("worker context is bounded, redacted, and omits tool payloads", () => {
   assert.match(context, /\[REDACTED\]/);
   assert.doesNotMatch(context, /echo hidden/);
   assert.ok(context.length <= 6000);
+});
+
+test("Grunt failure diagnostics are redacted, flattened, and bounded", () => {
+  const secret = `sk-${"x".repeat(40)}`;
+  const message = sanitizeFailureMessage(
+    `bad\napi_key=${secret}\u0000\u0085\u2028\u2029${"z".repeat(600)}`,
+    "Grunt failed.",
+  );
+  assert.ok(message.length <= 500);
+  assert.doesNotMatch(message, /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+  assert.doesNotMatch(message, new RegExp(secret));
+  assert.match(message, /\[REDACTED\]/);
+  assert.equal(
+    sanitizeFailureMessage("authorization: Bearer short-token", "Grunt failed."),
+    "[REDACTED]",
+  );
+  assert.equal(sanitizeFailureMessage({ private: "value" }, "Grunt failed."), "Grunt failed.");
 });
 
 test("worker context deduplicates before selecting recent complete records", () => {

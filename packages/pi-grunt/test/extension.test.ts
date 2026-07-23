@@ -203,6 +203,67 @@ test("dynamic mode falls back to direct when isolation setup fails", async () =>
   }
 });
 
+test("Grunt publishes sanitized bounded worker and outer failure details", async () => {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const root = await mkdtemp(join(tmpdir(), "grunt-failure-details-"));
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  try {
+    const tools = new Map<string, any>();
+    const pi: any = {
+      events: new Bus(), on() {}, registerCommand() {}, getActiveTools: () => [], setActiveTools() {},
+      registerTool: (tool: any) => tools.set(tool.name, tool), exec() {},
+    };
+    const secret = `sk-${"x".repeat(40)}`;
+    let outcome: "failure" | "success" | "throw" = "failure";
+    await saveConfig({ version: 1, disabled: false, mode: "direct" });
+    grunt(pi, async (_args, options): Promise<WorkerRun> => {
+      if (outcome === "throw") throw { private: "value" };
+      return {
+        text: outcome === "success" ? "Status: completed" : "",
+        cwd: options.cwd, model: "worker", stopReason: "stop", stderr: "", durationMs: 1,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, turns: 1,
+        truncated: false, exitCode: outcome === "success" ? 0 : 1, activity: [],
+        ...(outcome === "failure" ? {
+          error: `bad\napi_key=${secret}\u0085\u2028${"z".repeat(600)}`,
+          failure: "child_error" as const,
+        } : {}),
+      };
+    });
+    const model = { provider: "test", id: "worker" };
+    const ctx: any = {
+      cwd: root, hasUI: false, model,
+      modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key" }), find: () => model },
+    };
+
+    const failed = await tools.get("grunt").execute(
+      "failed", { task: "Edit file", thinking: "medium" }, undefined, undefined, ctx,
+    );
+    assert.equal(failed.details.failureCode, "child_error");
+    assert.ok(failed.details.failureMessage.length <= 500);
+    assert.doesNotMatch(failed.details.failureMessage, new RegExp(secret));
+    assert.doesNotMatch(failed.details.failureMessage, /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+    assert.match(failed.content[0].text, /\[REDACTED\]/);
+    assert.doesNotMatch(failed.content[0].text, new RegExp(secret));
+
+    outcome = "success";
+    const succeeded = await tools.get("grunt").execute(
+      "success", { task: "Edit file", thinking: "medium" }, undefined, undefined, ctx,
+    );
+    assert.equal(Object.hasOwn(succeeded.details, "failureMessage"), false);
+
+    outcome = "throw";
+    const thrown = await tools.get("grunt").execute(
+      "throw", { task: "Edit file", thinking: "medium" }, undefined, undefined, ctx,
+    );
+    assert.equal(thrown.details.failureCode, "worker_error");
+    assert.equal(thrown.details.failureMessage, "Grunt execution failed.");
+    assert.doesNotMatch(thrown.content[0].text, /private|value/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  }
+});
+
 test("Grunt guidance favors high-displacement work and retains Main ownership", () => {
   const events = new Bus();
   const tools = new Map<string, any>();

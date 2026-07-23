@@ -71,6 +71,29 @@ test("Repo Scout renders collapsed failures with reason", async () => {
   } finally { runtime.restore(); }
 });
 
+test("Repo Scout publishes sanitized bounded child failure details", async () => {
+  const secret = `sk-${"x".repeat(40)}`;
+  const runtime = await harness(async (): Promise<ScoutRun> => ({
+    text: "", error: `bad\napi_key=${secret}\u2028${"z".repeat(600)}`,
+    stderr: "", durationMs: 1,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+    turns: [], truncated: false, exitCode: 1, activity: [],
+    budgetExceeded: false, finalizationAttempted: false, finalizationSucceeded: false,
+    contextTokens: 0, cacheReadTokens: 0,
+  }));
+  try {
+    const result = await runtime.tools.get("repo_scout").execute(
+      "failure", { task: "inspect" }, undefined, undefined, context({ hasUI: false }),
+    );
+    assert.equal(result.details.failureCode, "child_error");
+    assert.ok(result.details.failureMessage.length <= 500);
+    assert.doesNotMatch(result.details.failureMessage, new RegExp(secret));
+    assert.doesNotMatch(result.details.failureMessage, /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+    assert.match(result.content[0].text, /\[possible credential redacted\]/);
+    assert.doesNotMatch(result.content[0].text, new RegExp(secret));
+  } finally { runtime.restore(); }
+});
+
 test("steering preserves the current repo Scout call sequence", () => {
   assert.equal(startsNewRepoSequence({ source: "interactive", streamingBehavior: "steer" }), false);
   assert.equal(startsNewRepoSequence({ source: "interactive" }), true);
@@ -121,6 +144,7 @@ test("parallel Repo Scout calls are serialized into fresh child sessions; only f
     assert.equal(calls, 2);
     assert.equal(results[0].details.callNumber, 1);
     assert.equal(results[1].details.callNumber, 2);
+    assert.equal(Object.hasOwn(results[0].details, "failureMessage"), false);
     assert.ok(childArgs.every((args) => !args.includes("--continue")));
     assert.ok(childArgs.every((args) => args.includes("--system-prompt")));
     assert.ok(childArgs.every((args) => !args.includes("--append-system-prompt")));
@@ -284,6 +308,7 @@ test("Web Scout validates input and requires exactly one Helios capability befor
 
 test("Web Scout launches headless without UI or confirmation and revokes grant", async () => {
   let childArgs: string[] = [];
+  let childError: string | undefined;
   const run = async (args: string[]): Promise<ScoutRun> => {
     childArgs = args;
     return {
@@ -291,6 +316,7 @@ test("Web Scout launches headless without UI or confirmation and revokes grant",
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
       turns: [], truncated: false, exitCode: 0, activity: [], budgetExceeded: false,
       finalizationAttempted: false, finalizationSucceeded: false, contextTokens: 0, cacheReadTokens: 0,
+      ...(childError ? { error: childError } : {}),
     };
   };
   const runtime = await harness(run);
@@ -321,6 +347,17 @@ test("Web Scout launches headless without UI or confirmation and revokes grant",
     assert.equal(confirmations, 0);
     assert.equal(revoked, 2);
     assert.equal(statuses.at(-1), undefined);
+
+    const secret = `sk-${"x".repeat(40)}`;
+    childError = `provider\napi_key=${secret}\u2028failed`;
+    const failed = await runtime.tools.get("web_scout").execute(
+      "failed", { task: "read current docs", maxPages: 2 }, undefined, undefined,
+      context({ hasUI: false }),
+    );
+    assert.equal(failed.details.failureCode, "child_error");
+    assert.equal(failed.details.failureMessage, "provider [possible credential redacted] failed");
+    assert.doesNotMatch(failed.content[0].text, new RegExp(secret));
+    assert.equal(revoked, 3);
     assert.deepEqual(options, { maxPages: 2, maxActions: 20, headed: false });
     for (const flag of ["--no-extensions", "--no-approve", "--no-builtin-tools", "--no-session"]) assert.ok(childArgs.includes(flag));
     assert.ok(childArgs.includes("scout_browser"));

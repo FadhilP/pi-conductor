@@ -22,6 +22,7 @@ import {
 } from "../src/config.ts";
 import { advisorMaxTokens, buildSnapshot, type DuplicateTelemetry, type SectionAllocation } from "../src/context.ts";
 import { loadEvidenceRecords, type EvidenceRef } from "../src/evidence.ts";
+import { redact } from "../src/redact.ts";
 
 type FailureCode =
   | "unavailable"
@@ -51,6 +52,7 @@ type Details = {
   sectionAllocations?: Record<string, SectionAllocation>;
   duplicateTelemetry?: DuplicateTelemetry;
   failureCode?: FailureCode;
+  failureMessage?: string;
 };
 const emptyUsage = () => ({
   input: 0,
@@ -63,6 +65,18 @@ const modelName = (model: { provider: string; id: string }) =>
   `${model.provider}/${model.id}`;
 const ADVISOR_TIMEOUT_MS = 15 * 60 * 1000;
 const HEARTBEAT_MS = 1_000;
+const FAILURE_MESSAGE_MAX_LENGTH = 500;
+function failureMessage(value: unknown, fallback: string): string {
+  const message = value instanceof Error
+    ? value.message
+    : typeof value === "string"
+      ? value
+      : fallback;
+  const clean = redact(message).text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim() || fallback;
+  return clean.length > FAILURE_MESSAGE_MAX_LENGTH
+    ? `${clean.slice(0, FAILURE_MESSAGE_MAX_LENGTH - 3)}...`
+    : clean;
+}
 function errorCode(
   error: unknown,
   aborted: boolean,
@@ -384,6 +398,12 @@ export default function advisorExtension(pi: ExtensionAPI, completeAdvisor = com
               sectionAllocations: snapshot.sectionAllocations,
               duplicateTelemetry: snapshot.duplicateTelemetry,
               failureCode: code,
+              failureMessage: failureMessage(
+                response.errorMessage,
+                !raw
+                  ? "Provider returned no text content."
+                  : "Provider returned an error without a message.",
+              ),
             },
           };
         }
@@ -439,6 +459,10 @@ export default function advisorExtension(pi: ExtensionAPI, completeAdvisor = com
             sectionAllocations: snapshot.sectionAllocations,
             duplicateTelemetry: snapshot.duplicateTelemetry,
             failureCode: code,
+            failureMessage: failureMessage(
+              error,
+              "Advisor request failed without an Error message.",
+            ),
           },
         };
       } finally {

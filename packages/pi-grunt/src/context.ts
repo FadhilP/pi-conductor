@@ -3,11 +3,25 @@ const secretPatterns = [
   /\b(?:sk|pk)-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g,
   /\b(?:ghp|github_pat|glpat)-[A-Za-z0-9_-]{20,}\b/g,
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
-  /\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+/gi,
+  /\b(?:authorization\s*[:=]\s*(?:bearer\s+)?[^\s,;]+|(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+)/gi,
 ];
+
+const FAILURE_MESSAGE_MAX_LENGTH = 500;
 
 function redact(text: string): string {
   return secretPatterns.reduce((value, pattern) => value.replace(pattern, "[REDACTED]"), text);
+}
+
+export function sanitizeFailureMessage(value: unknown, fallback: string): string {
+  const message = value instanceof Error
+    ? value.message
+    : typeof value === "string"
+      ? value
+      : fallback;
+  const clean = redact(message).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim() || fallback;
+  return clean.length > FAILURE_MESSAGE_MAX_LENGTH
+    ? `${clean.slice(0, FAILURE_MESSAGE_MAX_LENGTH - 3)}...`
+    : clean;
 }
 
 function contentText(content: unknown): string {
